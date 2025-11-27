@@ -1,0 +1,44 @@
+# Dependências
+node_modules/
+package-lock.json
+
+# Banco de dados
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Uploads e temporários
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+logs/*.log
+*.log
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+
+# Backups
+data/backup/*.db

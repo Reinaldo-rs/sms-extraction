@@ -1,0 +1,39 @@
+{
+  "name": "sms-extraction",
+  "version": "2.0.0",
+  "description": "Sistema avançado de extração automática de dados de screenshots de SMS.",
+  "main": "main.js",
+  "type": "module",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "start": "node main.js",
+    "dev": "nodemon main.js",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/**/*.js",
+    "lint:fix": "eslint src/**/*.js --fix"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Reinaldo-rs/sms-extraction.git"
+  },
+  "keywords": [
+    "sms",
+    "ocr",
+    "extraction",
+    "machine-learning"
+  ],
+  "author": "Reinaldo-rs",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Reinaldo-rs/sms-extraction/issues"
+  },
+  "homepage": "https://github.com/Reinaldo-rs/sms-extraction#readme",
+  "devDependencies": {
+    "eslint": "^9.39.1",
+    "jest": "^30.2.0",
+    "nodemon": "^3.1.11"
+  }
+}

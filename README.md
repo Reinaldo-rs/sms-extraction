@@ -1,2 +1,9 @@
-# sms-extraction
-O projeto tem como objetivo extrair automaticamente informações de prints de SMS, usando OCR + regras rígidas de interpretação, para:  identificar remetente  identificar a data real do print  extrair todas as mensagens, horas e corpo do texto  organizar tudo em um banco estruturado  e renomear cada print de forma padronizada e 100% confiável.
+# SMS Extraction v2.0
+
+Sistema avançado de extração automática de dados de screenshots de SMS.
+
+## Status
+🚧 Em desenvolvimento
+
+## Versão
+2.0 (Fase 1 - Setup)
