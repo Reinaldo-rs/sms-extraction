@@ -39,3 +39,20 @@ const logger = winston.createLogger({
         })
     ]
 })
+
+// Console logging em ambiente de desenvolvimento
+if(process.env.NODE_ENV !== 'production') {
+    logger.add(new winston.transports.Console({
+        format: winston.format.combine(
+            winston.format.colorize(),
+            winston.format.simple()
+        )
+    }))
+}
+
+// Atalhos
+logger.success = (msg, meta) => logger.info(`✅${msg}`, meta)
+logger.fail = (msg, meta) => logger.error(`❌${msg}`, meta)
+logger.warnMsg = (msg, meta) => logger.warn(`⚠️${msg}`, meta)
+
+export default logger
