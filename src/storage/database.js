@@ -111,6 +111,192 @@ class DatabaseManager {
             return false
         }
     }
+
+    // ========== MÉTODOS CRUD ==========
+
+    /**
+     * Insere uma nova extração no banco
+     */
+    insertExtraction(extraction) {
+        try {
+            const db = this.connect()
+
+            const stmt = db.prepare(`
+                INSERT INTO extractions (
+                    id, filename, sender, date, messages_json,
+                    confidence_overall, confidence_date, confidence_sender, confidence_messages,
+                    processing_time_ms, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `)
+
+            const info = stmt.run(
+                extraction.id,
+                extraction.filename,
+                extraction.sender,
+                extraction.date,
+                JSON.stringify(extraction.messages),
+                extraction.confidence.overall,
+                extraction.confidence.date,
+                extraction.confidence.sender,
+                extraction.confidence.messages,
+                extraction.processingTime,
+                extraction.status || 'processed'
+            )
+
+            console.log('✅ Extração inserida:', extraction.id)
+            return info.changes > 0
+        } catch (error) {
+            console.error('❌ Erro ao inserir extração:', error.message)
+            throw error
+        }
+    }
+
+    /**
+     * Busca extração por ID
+     */
+    getExtraction(id) {
+        try {
+            const db = this.connect()
+            const stmt = db.prepare('SELECT * FROM extractions WHERE id = ?')
+            const result = stmt.get(id)
+
+            if (result) {
+                // Parse JSON das mensagens
+                result.messages = JSON.parse(result.messages_json)
+                delete result.messages_json
+            }
+
+            return result
+        } catch (error) {
+            console.error('❌ Erro ao buscar extração:', error.message)
+            throw error
+        }
+    }
+
+    /**
+     * Lista extrações com filtros
+     */
+    listExtractions(options = {}) {
+        try {
+            const db = this.connect()
+            const { limit = 50, offset = 0, status, sender } = options
+
+            let query = 'SELECT * FROM extractions WHERE 1=1'
+            const params = []
+
+            if (status) {
+                query += ' AND status = ?'
+                params.push(status)
+            }
+
+            if (sender) {
+                query += ' AND sender LIKE ?'
+                params.push(`%${sender}%`)
+            }
+
+            query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+            params.push(limit, offset)
+
+            const stmt = db.prepare(query)
+            const results = stmt.all(...params)
+
+            // Parse JSON das mensagens
+            results.forEach(result => {
+                result.messages = JSON.parse(result.messages_json)
+                delete result.messages_json
+            })
+
+            return results
+        } catch (error) {
+            console.error('❌ Erro ao listar extrações:', error.message)
+            throw error
+        }
+    }
+
+    /**
+     * Atualiza status de uma extração
+     */
+    updateStatus(id, newStatus) {
+        try {
+            const db = this.connect()
+            const stmt = db.prepare('UPDATE extractions SET status = ? WHERE id = ?')
+            const info = stmt.run(newStatus, id)
+
+            console.log(`✅ Status atualizado: ${id} → ${newStatus}`)
+            return info.changes > 0
+        } catch (error) {
+            console.error('❌ Erro ao atualizar status:', error.message)
+            throw error
+        }
+    }
+
+    /**
+     * Deleta uma extração
+     */
+    deleteExtraction(id) {
+        try {
+            const db = this.connect()
+            const stmt = db.prepare('DELETE FROM extractions WHERE id = ?')
+            const info = stmt.run(id)
+
+            console.log('✅ Extração deletada:', id)
+            return info.changes > 0
+        } catch (error) {
+            console.error('❌ Erro ao deletar extração:', error.message)
+            throw error
+        }
+    }
+
+    /**
+     * Conta total de extrações
+     */
+    countExtractions(status = null) {
+        try {
+            const db = this.connect()
+
+            let query = 'SELECT COUNT(*) as total FROM extractions'
+            const params = []
+
+            if (status) {
+                query += ' WHERE status = ?'
+                params.push(status)
+            }
+
+            const stmt = db.prepare(query)
+            const result = stmt.get(...params)
+
+            return result.total
+        } catch (error) {
+            console.error('❌ Erro ao contar extrações:', error.message)
+            throw error
+        }
+    }
+
+    /**
+     * Estatísticas gerais
+     */
+    getStats() {
+        try {
+            const db = this.connect()
+
+            const stats = db.prepare(`
+                SELECT 
+                    COUNT(*) as total,
+                    AVG(confidence_overall) as avg_confidence,
+                    AVG(processing_time_ms) as avg_time,
+                    SUM(CASE WHEN status = 'processed' THEN 1 ELSE 0 END) as processed,
+                    SUM(CASE WHEN status = 'review' THEN 1 ELSE 0 END) as review,
+                    SUM(CASE WHEN status = 'corrected' THEN 1 ELSE 0 END) as corrected,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error
+                FROM extractions
+            `).get()
+
+            return stats
+        } catch (error) {
+            console.error('❌ Erro ao buscar estatísticas:', error.message)
+            throw error
+        }
+    }
 }
 
 export default DatabaseManager

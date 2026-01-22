@@ -1,13 +1,20 @@
 import winston from 'winston'
 import path from 'path'
 import fs from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname } from 'path'
 
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
+// Garante que pasta logs existe
 const logsDir = path.join(__dirname, '../../logs')
 if (!fs.existsSync(logsDir)) {
     fs.mkdirSync(logsDir, { recursive: true })
 }
 
-const customFormart = winston.format.combine(
+// Formato customizado
+const customFormat = winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
     winston.format.errors({ stack: true }),
     winston.format.printf(({ timestamp, level, message, stack }) => {
@@ -19,29 +26,30 @@ const customFormart = winston.format.combine(
     })
 )
 
+// Criar logger
 const logger = winston.createLogger({
     level: process.env.LOG_LEVEL || 'info',
     format: winston.format.combine(
         winston.format.timestamp(),
-        winston.format.json(),
+        winston.format.json()
     ),
     transports: [
         // Erros em arquivo separado
         new winston.transports.File({
             filename: path.join(logsDir, 'error.log'),
             level: 'error',
-            format: customFormart
+            format: customFormat
         }),
         // Todos os logs
         new winston.transports.File({
             filename: path.join(logsDir, 'combined.log'),
-            format: customFormart
+            format: customFormat
         })
     ]
 })
 
-// Console logging em ambiente de desenvolvimento
-if(process.env.NODE_ENV !== 'production') {
+// Console em desenvolvimento
+if (process.env.NODE_ENV !== 'production') {
     logger.add(new winston.transports.Console({
         format: winston.format.combine(
             winston.format.colorize(),
@@ -50,9 +58,9 @@ if(process.env.NODE_ENV !== 'production') {
     }))
 }
 
-// Atalhos
-logger.success = (msg, meta) => logger.info(`✅${msg}`, meta)
-logger.fail = (msg, meta) => logger.error(`❌${msg}`, meta)
-logger.warnMsg = (msg, meta) => logger.warn(`⚠️${msg}`, meta)
+// Atalhos úteis
+logger.success = (message, meta) => logger.info(`✅ ${message}`, meta)
+logger.fail = (message, meta) => logger.error(`❌ ${message}`, meta)
+logger.warning = (message, meta) => logger.warn(`⚠️  ${message}`, meta)
 
 export default logger
