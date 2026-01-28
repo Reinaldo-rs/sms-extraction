@@ -1,146 +1,221 @@
 import sharp from 'sharp'
 
 /**
- * Detecta se uma imagem está rotacionada e corrige
+ * Configuração do detector de rotação.
+ * Todos os thresholds e limites são externalizados aqui.
+ */
+const DEFAULT_CONFIG = {
+  // Heurística dimensional
+  suspiciousAspectRatio: 0.4,      // height/width > 2.5x indica possível rotação
+  wideAspectRatio: 2.5,            // width/height > 2.5x também indica possível rotação
+  
+  // Análise visual (fallback)
+  visualMinSize: 100,              // Imagens < 100px não valem análise
+  visualMaxSize: 10_000_000,       // Imagens > 10MP são muito caras
+  visualResizeTarget: 150,         // Reduzir para análise rápida
+  visualGradientThreshold: 40,     // Mínimo para considerar borda
+  visualRatioThreshold: 2.0,       // Ratio vertical/horizontal para detectar rotação
+  visualSampleStep: 5,             // Pular pixels na amostragem
+  
+  // Logs
+  enableLogs: false                // Desabilitar em produção
+}
+
+/**
+ * Detecta se uma imagem está rotacionada e corrige.
+ * 
+ * OTIMIZADO PARA: prints/screenshots em PNG (95%+ dos casos)
+ * 
+ * Filosofia:
+ * - PNG de print = decisão instantânea baseada em dimensões
+ * - Fotos (JPEG/HEIC) = EXIF primeiro, visual se necessário
+ * - Evitar sharp.raw() e processamento pesado quando desnecessário
  */
 class RotationDetector {
+  constructor(config = {}) {
+    this.config = { ...DEFAULT_CONFIG, ...config }
+    this.log = this.config.enableLogs ? console.log : () => {}
+  }
+
   /**
-   * Detecta rotação da imagem
-   * @param {Buffer|string} input - Buffer ou caminho da imagem
-   * @returns {Object} - Ângulo detectado e confiança
+   * Detecta rotação da imagem.
+   * 
+   * Para PNG: apenas metadata + heurística dimensional (< 10ms)
+   * Para JPEG/HEIC: metadata + EXIF, fallback visual se necessário
    */
   async detect(input) {
     try {
       const image = sharp(input)
       const metadata = await image.metadata()
-
-      // Estratégia 1: Verificar EXIF orientation (mais rápido e preciso)
-      const exifRotation = this.detectFromExif(metadata)
       
-      if (exifRotation.angle !== 0) {
-        console.log(`🔄 Rotação detectada via EXIF: ${exifRotation.angle}°`)
-        return exifRotation
+      const { format, width, height } = metadata
+
+      // PNG: decisão rápida baseada apenas em dimensões
+      if (format === 'png') {
+        return this.detectPngRotation(width, height)
       }
 
-      // Estratégia 2: Análise visual (mais lento)
-      console.log('🔍 EXIF não disponível, analisando visualmente...')
-      const visualRotation = await this.detectVisually(image)
-      
-      return visualRotation
+      // Fotos: EXIF primeiro
+      const exifResult = this.detectFromExif(metadata)
+      if (exifResult.needsRotation) {
+        this.log(`📷 EXIF: ${exifResult.angle}°`)
+        return exifResult
+      }
+
+      // Fallback: análise visual (raramente usado)
+      if (this.shouldUseVisualAnalysis(format, width, height)) {
+        this.log('🔍 Fallback visual')
+        return await this.detectVisually(image, width, height)
+      }
+
+      // Default: assumir correto
+      return this.createResult(0, 0.8, 'assumed_correct')
 
     } catch (error) {
-      console.error('❌ Erro ao detectar rotação:', error.message)
-      return {
-        angle: 0,
-        confidence: 0,
-        method: 'error',
-        needsRotation: false
-      }
+      console.error('Erro ao detectar rotação:', error.message)
+      return this.createResult(0, 0, 'error', false, { error: error.message })
     }
   }
 
   /**
-   * Detecta rotação via metadados EXIF
+   * Detecção para PNG: puramente dimensional.
+   * Não precisa processar pixels, apenas analisar aspect ratio.
+   */
+  detectPngRotation(width, height) {
+    const aspectRatio = width / height
+    const { suspiciousAspectRatio, wideAspectRatio } = this.config
+
+    // Extremamente vertical (altura >> largura)
+    // Ex: 500x2000 = 0.25 < 0.4 → pode ser rotacionado
+    if (aspectRatio < suspiciousAspectRatio) {
+      this.log(`📐 PNG vertical suspeito: ${width}x${height}`)
+      return this.createResult(90, 0.7, 'dimensional_vertical', true, {
+        aspectRatio,
+        reason: 'narrow_vertical'
+      })
+    }
+
+    // Extremamente horizontal (largura >> altura)
+    // Ex: 2000x500 = 4.0 > 2.5 → pode ser rotacionado
+    if (aspectRatio > wideAspectRatio) {
+      this.log(`📐 PNG horizontal suspeito: ${width}x${height}`)
+      return this.createResult(90, 0.6, 'dimensional_horizontal', true, {
+        aspectRatio,
+        reason: 'narrow_horizontal'
+      })
+    }
+
+    // Caso normal: PNG provavelmente correto
+    this.log(`✅ PNG dimensões normais: ${width}x${height}`)
+    return this.createResult(0, 0.95, 'png_default', false, { aspectRatio })
+  }
+
+  /**
+   * Detecção via EXIF (fotos de câmera).
    */
   detectFromExif(metadata) {
-    const orientation = metadata.orientation
+    const { orientation } = metadata
 
-    // Mapeamento EXIF orientation para graus
-    const orientationMap = {
-      1: 0,    // Normal
-      2: 0,    // Flip horizontal
-      3: 180,  // Rotate 180
-      4: 0,    // Flip vertical
-      5: 0,    // Flip horizontal + rotate 270 CW
-      6: 90,   // Rotate 90 CW
-      7: 0,    // Flip horizontal + rotate 90 CW
-      8: 270   // Rotate 270 CW
+    const rotationMap = {
+      3: 180,
+      6: 90,
+      8: 270
     }
 
-    const angle = orientationMap[orientation] || 0
+    const angle = rotationMap[orientation] || 0
 
-    return {
+    return this.createResult(
       angle,
-      confidence: angle !== 0 ? 1.0 : 0,
-      method: 'exif',
-      needsRotation: angle !== 0,
-      originalOrientation: orientation
-    }
+      angle !== 0 ? 1.0 : 0,
+      'exif',
+      angle !== 0,
+      { originalOrientation: orientation }
+    )
   }
 
   /**
-   * Detecta rotação analisando a imagem visualmente
-   * (simplificado - detecta apenas 90, 180, 270 graus)
+   * Decide se vale a pena usar análise visual.
+   * Apenas para formatos foto SEM EXIF útil.
    */
-  async detectVisually(image) {
+  shouldUseVisualAnalysis(format, width, height) {
+    const { visualMinSize, visualMaxSize } = this.config
+    const totalPixels = width * height
+
+    // Nunca para PNG (já tratado)
+    if (format === 'png') return false
+
+    // Não para imagens muito pequenas ou muito grandes
+    if (width < visualMinSize || height < visualMinSize) return false
+    if (totalPixels > visualMaxSize) return false
+
+    // Apenas para JPEG/HEIC sem EXIF
+    return format === 'jpeg' || format === 'jpg' || format === 'heic'
+  }
+
+  /**
+   * Análise visual: último recurso.
+   * Detecta apenas rotação de 90° baseado em predominância de bordas.
+   */
+  async detectVisually(image, originalWidth, originalHeight) {
     try {
-      // Reduz imagem para análise rápida
+      const { visualResizeTarget, visualGradientThreshold, visualRatioThreshold, visualSampleStep } = this.config
+
+      // Resize para análise rápida
       const { data, info } = await image
         .clone()
-        .resize(200, 200, { fit: 'inside' })
+        .resize(visualResizeTarget, visualResizeTarget, { fit: 'inside' })
         .greyscale()
         .raw()
         .toBuffer({ resolveWithObject: true })
 
-      // Detecta predominância de linhas horizontais vs verticais
-      const { horizontal, vertical } = this.detectEdgeDirection(data, info.width, info.height)
-
-      // Se muitas linhas verticais, provavelmente rotacionada 90° ou 270°
-      let angle = 0
-      let confidence = 0.5
+      const { horizontal, vertical } = this.computeGradients(
+        data,
+        info.width,
+        info.height,
+        visualGradientThreshold,
+        visualSampleStep
+      )
 
       const ratio = vertical / (horizontal + 1)
 
-      if (ratio > 1.5) {
-        // Muitas linhas verticais = rotação de 90° ou 270°
-        // Por simplicidade, assumimos 90° (mais comum)
-        angle = 90
-        confidence = Math.min(ratio / 2, 1.0)
-      } else if (ratio < 0.5) {
-        // Muitas linhas horizontais = provavelmente normal
-        angle = 0
-        confidence = 0.8
+      // Só detecta rotação se ratio for muito alto
+      if (ratio > visualRatioThreshold) {
+        return this.createResult(90, 0.6, 'visual', true, {
+          horizontal,
+          vertical,
+          ratio
+        })
       }
 
-      return {
-        angle,
-        confidence,
-        method: 'visual',
-        needsRotation: angle !== 0,
-        analysis: { horizontal, vertical, ratio }
-      }
+      return this.createResult(0, 0.5, 'visual_uncertain', false, {
+        horizontal,
+        vertical,
+        ratio
+      })
 
     } catch (error) {
-      console.error('❌ Erro na análise visual:', error.message)
-      return {
-        angle: 0,
-        confidence: 0,
-        method: 'visual_failed',
-        needsRotation: false
-      }
+      console.error('Erro na análise visual:', error.message)
+      return this.createResult(0, 0, 'visual_failed')
     }
   }
 
   /**
-   * Detecta direção predominante das bordas (simplificado)
+   * Calcula gradientes horizontais e verticais.
+   * Amostragem esparsa para velocidade.
    */
-  detectEdgeDirection(data, width, height) {
+  computeGradients(data, width, height, threshold, step) {
     let horizontal = 0
     let vertical = 0
 
-    // Amostragem a cada 4 pixels para velocidade
-    for (let y = 1; y < height - 1; y += 4) {
-      for (let x = 1; x < width - 1; x += 4) {
+    for (let y = 1; y < height - 1; y += step) {
+      for (let x = 1; x < width - 1; x += step) {
         const idx = y * width + x
 
-        // Gradiente horizontal
         const gx = Math.abs(data[idx + 1] - data[idx - 1])
-        
-        // Gradiente vertical
         const gy = Math.abs(data[idx + width] - data[idx - width])
 
-        if (gx > 30) horizontal++
-        if (gy > 30) vertical++
+        if (gx > threshold) horizontal++
+        if (gy > threshold) vertical++
       }
     }
 
@@ -148,27 +223,50 @@ class RotationDetector {
   }
 
   /**
-   * Aplica rotação na imagem
+   * Aplica rotação na imagem.
    */
   async rotate(input, angle) {
-    try {
-      if (angle === 0) {
-        console.log('ℹ️  Sem rotação necessária')
-        return input
-      }
+    if (angle === 0) {
+      this.log('ℹ️  Sem rotação necessária')
+      return input
+    }
 
-      console.log(`🔄 Rotacionando ${angle}°...`)
-      
-      const rotated = await sharp(input)
+    this.log(`🔄 Rotacionando ${angle}°`)
+
+    try {
+      return await sharp(input)
         .rotate(angle)
         .toBuffer()
-
-      console.log('✅ Imagem rotacionada com sucesso')
-      return rotated
-
     } catch (error) {
-      console.error('❌ Erro ao rotacionar imagem:', error.message)
+      console.error('Erro ao rotacionar:', error.message)
       throw error
+    }
+  }
+
+  /**
+   * Detecta e corrige em uma operação.
+   */
+  async detectAndCorrect(input) {
+    const detection = await this.detect(input)
+
+    if (detection.needsRotation) {
+      const buffer = await this.rotate(input, detection.angle)
+      return { buffer, detection }
+    }
+
+    return { buffer: input, detection }
+  }
+
+  /**
+   * Helper: cria objeto de resultado padronizado.
+   */
+  createResult(angle, confidence, method, needsRotation = angle !== 0, extra = {}) {
+    return {
+      angle,
+      confidence,
+      method,
+      needsRotation,
+      ...extra
     }
   }
 }
