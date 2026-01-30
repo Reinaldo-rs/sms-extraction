@@ -8,7 +8,7 @@ const DEFAULT_CONFIG = {
   // Heurística dimensional
   suspiciousAspectRatio: 0.4,      // height/width > 2.5x indica possível rotação
   wideAspectRatio: 2.5,            // width/height > 2.5x também indica possível rotação
-  
+
   // Análise visual (fallback)
   visualMinSize: 100,              // Imagens < 100px não valem análise
   visualMaxSize: 10_000_000,       // Imagens > 10MP são muito caras
@@ -16,9 +16,9 @@ const DEFAULT_CONFIG = {
   visualGradientThreshold: 40,     // Mínimo para considerar borda
   visualRatioThreshold: 2.0,       // Ratio vertical/horizontal para detectar rotação
   visualSampleStep: 5,             // Pular pixels na amostragem
-  
+
   // Logs
-  enableLogs: false                // Desabilitar em produção
+  enableLogs: true                // Desabilitar em produção
 }
 
 /**
@@ -34,7 +34,7 @@ const DEFAULT_CONFIG = {
 class RotationDetector {
   constructor(config = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config }
-    this.log = this.config.enableLogs ? console.log : () => {}
+    this.log = this.config.enableLogs ? console.log : () => { }
   }
 
   /**
@@ -47,7 +47,7 @@ class RotationDetector {
     try {
       const image = sharp(input)
       const metadata = await image.metadata()
-      
+
       const { format, width, height } = metadata
 
       // PNG: decisão rápida baseada apenas em dimensões
@@ -84,6 +84,16 @@ class RotationDetector {
   detectPngRotation(width, height) {
     const aspectRatio = width / height
     const { suspiciousAspectRatio, wideAspectRatio } = this.config
+
+    // Simplesmente horizontal (largura > altura)
+    // Ex: 960x480 = 2 > 1 → posição horizontal
+    if (aspectRatio > 1) {
+      this.log(`📐 PNG simplesmente horizontal: ${width} > ${height}`)
+      return this.createResult(-90, 1, 'simply_horizontal', true, {
+        aspectRatio,
+        reason: 'width_comparison'
+      })
+    }
 
     // Extremamente vertical (altura >> largura)
     // Ex: 500x2000 = 0.25 < 0.4 → pode ser rotacionado
@@ -259,7 +269,15 @@ class RotationDetector {
 
   /**
    * Helper: cria objeto de resultado padronizado.
-   */
+    *
+    * @param {number} angle - Ângulo calculado.
+    * @param {number} confidence - Confiança do resultado.
+    * @param {string} method - Método utilizado.
+    * @param {boolean} [needsRotation=angle !== 0] - Indica se precisa rotacionar.
+    * @param {Object} [extra={}] - Dados adicionais.
+    *
+    * @returns {Object} Resultado padronizado.
+    */
   createResult(angle, confidence, method, needsRotation = angle !== 0, extra = {}) {
     return {
       angle,
