@@ -5,115 +5,175 @@ import sharp from 'sharp'
 import fs from 'fs'
 import path from 'path'
 
+const DEFAULT_CONFIG = {
+  // Preprocessor geral
+  enableLogs: true,
+  enableQualityAnalysis: true,
+  enableRotationDetection: true,
+  enableEnhancement: true,
+  returnOriginalBuffer: false,
+  
+  // Módulos específicos
+  quality: {
+    enableLogs: false
+  },
+  rotation: {
+    osdStrategy: 'never',
+    enableLogs: false
+  },
+  enhancement: {
+    enableLogs: false
+  }
+}
+
 /**
- * Orquestrador completo de preprocessamento
+ * Preprocessor com Pipeline Único do Sharp
  */
 class Preprocessor {
-  constructor() {
-    this.qualityAnalyzer = new QualityAnalyzer()
-    this.rotationDetector = new RotationDetector()
-    this.imageEnhancer = new ImageEnhancer()
+  constructor(config = {}, ocrEngine = null) {
+    this.config = { ...DEFAULT_CONFIG, ...config }
+    this.log = this.config.enableLogs ? console.log : () => {}
+    
+    // Inicializar módulos
+    this.qualityAnalyzer = new QualityAnalyzer(this.config.quality)
+    this.rotationDetector = new RotationDetector(this.config.rotation, ocrEngine)
+    this.imageEnhancer = new ImageEnhancer(this.config.enhancement)
   }
 
   /**
-   * Pipeline completo de preprocessamento
-   * @param {string} imagePath - Caminho da imagem
-   * @returns {Object} - Imagem processada + metadados
+   * Pipeline único de preprocessamento
+   * 
+   * FLUXO:
+   * 1. Carregar buffer original
+   * 2. Análise de qualidade (read-only)
+   * 3. Detecção de rotação (read-only)
+   * 4. Criar pipeline Sharp
+   * 5. Adicionar rotação ao pipeline
+   * 6. Adicionar melhorias ao pipeline
+   * 7. Executar tudo de uma vez (toBuffer)
    */
   async process(imagePath) {
     const startTime = Date.now()
+    const results = {}
     
     try {
-      console.log('\n' + '='.repeat(60))
-      console.log('🎨 INICIANDO PREPROCESSAMENTO')
-      console.log('='.repeat(60))
-      console.log(`📁 Arquivo: ${path.basename(imagePath)}`)
+      this.log('\n' + '='.repeat(60))
+      this.log('🎨 PREPROCESSAMENTO - PIPELINE ÚNICO')
+      this.log('='.repeat(60))
+      this.log(`📁 Arquivo: ${path.basename(imagePath)}`)
 
-      // Validar arquivo
+      // Validação
       this.validateFile(imagePath)
 
-      // Carregar imagem original
+      // Carregar buffer original
       let imageBuffer = fs.readFileSync(imagePath)
       const originalSize = imageBuffer.length
 
-      // ETAPA 1: Análise de Qualidade
-      console.log('\n📊 ETAPA 1/4: Análise de Qualidade')
-      console.log('-'.repeat(60))
-      const quality = await this.qualityAnalyzer.analyze(imageBuffer)
-      
-      this.printQualityReport(quality)
-
-      // ETAPA 2: Detecção de Rotação
-      console.log('\n🔄 ETAPA 2/4: Detecção de Rotação')
-      console.log('-'.repeat(60))
-      const rotation = await this.rotationDetector.detect(imageBuffer)
-      
-      this.printRotationReport(rotation)
-
-      // Aplicar rotação se necessário
-      if (rotation.needsRotation) {
-        imageBuffer = await this.rotationDetector.rotate(imageBuffer, rotation.angle)
+      // ETAPA 1: Análise de Qualidade (opcional, read-only)
+      if (this.config.enableQualityAnalysis) {
+        this.log('\n📊 ETAPA 1/3: Análise de Qualidade')
+        this.log('-'.repeat(60))
+        
+        results.quality = await this.qualityAnalyzer.analyze(imageBuffer)
+        this.printQualityReport(results.quality)
       }
 
-      // ETAPA 3: Melhorias na Imagem
-      console.log('\n✨ ETAPA 3/4: Aplicando Melhorias')
-      console.log('-'.repeat(60))
-      
-      let enhancedBuffer
-      if (quality.needsPreprocessing) {
-        enhancedBuffer = await this.imageEnhancer.enhance(imageBuffer, quality)
+      // ETAPA 2: Detecção de Rotação (opcional, read-only)
+      if (this.config.enableRotationDetection) {
+        this.log('\n🔄 ETAPA 2/3: Detecção de Rotação')
+        this.log('-'.repeat(60))
+        
+        results.rotation = await this.rotationDetector.detect(imageBuffer)
+        this.printRotationReport(results.rotation)
+      }
+
+      // ETAPA 3: Pipeline Único do Sharp
+      this.log('\n⚡ ETAPA 3/3: Pipeline Único do Sharp')
+      this.log('-'.repeat(60))
+
+      // Criar pipeline inicial
+      let pipeline = sharp(imageBuffer)
+
+      // Adicionar rotação ao pipeline (se necessário)
+      if (results.rotation?.needsRotation) {
+        this.log(`  🔄 Adicionando rotação de ${results.rotation.angle}° ao pipeline...`)
+        // pipeline = pipeline.rotate(results.rotation.angle)
+        pipeline = pipeline.rotate(results.rotation.angle)
+      }
+
+      // Adicionar melhorias ao pipeline (se habilitado)
+      if (this.config.enableEnhancement) {
+        const needsEnhancement = results.quality?.needsPreprocessing ?? true
+        
+        if (needsEnhancement) {
+          this.log('  ✨ Adicionando melhorias ao pipeline...')
+          pipeline = this.imageEnhancer.enhance(pipeline, results.quality)
+        } else {
+          this.log('  🔧 Adicionando preprocessamento básico...')
+          pipeline = this.imageEnhancer.preprocessForOCR(pipeline)
+        }
       } else {
-        console.log('  ℹ️  Imagem já tem boa qualidade, aplicando preprocessamento básico...')
-        enhancedBuffer = await this.imageEnhancer.preprocessForOCR(imageBuffer)
+        // Mínimo: greyscale para OCR
+        this.log('  ⚙️  Convertendo para greyscale...')
+        pipeline = pipeline.greyscale()
       }
 
-      const enhancedSize = enhancedBuffer.length
+      // Executar pipeline de uma vez
+      this.log('  ⚡ Executando pipeline (decode → transform → encode)...')
+      const processedBuffer = await pipeline.toBuffer()
+      const processedSize = processedBuffer.length
 
-      // ETAPA 4: Validação Final
-      console.log('\n✅ ETAPA 4/4: Validação Final')
-      console.log('-'.repeat(60))
-      const finalMetadata = await sharp(enhancedBuffer).metadata()
-      
-      console.log(`  📐 Dimensões finais: ${finalMetadata.width}x${finalMetadata.height}`)
-      console.log(`  📦 Tamanho: ${(originalSize / 1024).toFixed(2)} KB → ${(enhancedSize / 1024).toFixed(2)} KB`)
-      console.log(`  🎨 Formato: ${finalMetadata.format}`)
-      console.log(`  📊 Canais: ${finalMetadata.channels}`)
-
-      const totalTime = Date.now() - startTime
+      // Metadata final
+      const finalMetadata = await sharp(processedBuffer).metadata()
 
       // Resumo
-      console.log('\n' + '='.repeat(60))
-      console.log('✅ PREPROCESSAMENTO CONCLUÍDO')
-      console.log('='.repeat(60))
-      console.log(`⏱️  Tempo total: ${totalTime}ms`)
-      console.log(`📊 Score de qualidade: ${(quality.score * 100).toFixed(1)}% (${quality.grade})`)
-      console.log('='.repeat(60) + '\n')
+      const totalTime = Date.now() - startTime
+      
+      this.log('\n' + '='.repeat(60))
+      this.log('✅ PREPROCESSAMENTO CONCLUÍDO')
+      this.log('='.repeat(60))
+      this.log(`⏱️  Tempo total: ${totalTime}ms`)
+      
+      if (results.quality) {
+        this.log(`📊 Score: ${(results.quality.score * 100).toFixed(1)}% (${results.quality.grade})`)
+      }
+      
+      if (results.rotation?.needsRotation) {
+        this.log(`🔄 Rotação aplicada: ${results.rotation.angle}°`)
+      }
+      
+      this.log(`📐 Dimensões: ${finalMetadata.width}x${finalMetadata.height}`)
+      this.log(`📦 Tamanho: ${(originalSize / 1024).toFixed(2)} KB → ${(processedSize / 1024).toFixed(2)} KB`)
+      this.log(`🎨 Canais: ${finalMetadata.channels} (${finalMetadata.space})`)
+      this.log('='.repeat(60) + '\n')
 
       return {
         success: true,
-        original: {
-          path: imagePath,
-          size: originalSize,
-          buffer: imageBuffer
-        },
         processed: {
-          buffer: enhancedBuffer,
-          size: enhancedSize,
+          buffer: processedBuffer,
+          size: processedSize,
           metadata: finalMetadata
         },
-        quality,
-        rotation,
+        ...(this.config.returnOriginalBuffer && {
+          original: {
+            path: imagePath,
+            size: originalSize,
+            buffer: imageBuffer
+          }
+        }),
+        ...results,
         processingTime: totalTime
       }
 
     } catch (error) {
       console.error('\n❌ Erro no preprocessamento:', error.message)
+      await this.cleanup().catch(() => {})
       throw error
     }
   }
 
   /**
-   * Valida se arquivo existe e é imagem válida
+   * Valida arquivo
    */
   validateFile(imagePath) {
     if (!fs.existsSync(imagePath)) {
@@ -134,62 +194,87 @@ class Preprocessor {
       throw new Error(`Arquivo muito grande: ${(stats.size / 1024 / 1024).toFixed(2)}MB (máx: 10MB)`)
     }
 
-    console.log(`  ✓ Arquivo válido: ${(stats.size / 1024).toFixed(2)} KB`)
+    this.log(`  ✓ Arquivo válido: ${(stats.size / 1024).toFixed(2)} KB`)
   }
 
   /**
-   * Imprime relatório de qualidade formatado
+   * Relatórios formatados
    */
   printQualityReport(quality) {
-    console.log(`  📊 Score Geral: ${(quality.score * 100).toFixed(1)}% (Grade: ${quality.grade})`)
-    console.log(`  📏 Resolução: ${quality.analysis.resolution.dimensions} (${quality.analysis.resolution.megapixels}MP) - ${quality.analysis.resolution.status}`)
-    console.log(`  💡 Brilho: ${quality.analysis.brightness.percentage} - ${quality.analysis.brightness.status}`)
-    console.log(`  📊 Contraste: ${quality.analysis.contrast.stdDev} - ${quality.analysis.contrast.status}`)
-    console.log(`  🔪 Nitidez: ${quality.analysis.sharpness.variance} - ${quality.analysis.sharpness.status}`)
+    this.log(`  📊 Score: ${(quality.score * 100).toFixed(1)}% (${quality.grade})`)
+    this.log(`  📏 Resolução: ${quality.analysis.resolution.dimensions} - ${quality.analysis.resolution.status}`)
+    this.log(`  💡 Brilho: ${quality.analysis.brightness.percentage} - ${quality.analysis.brightness.status}`)
+    this.log(`  📊 Contraste: ${quality.analysis.contrast.stdDev} - ${quality.analysis.contrast.status}`)
+    this.log(`  🔪 Nitidez: ${quality.analysis.sharpness.variance} - ${quality.analysis.sharpness.status}`)
 
     if (quality.suggestions.length > 0) {
-      console.log(`  💡 Sugestões:`)
+      this.log(`  💡 Sugestões:`)
       quality.suggestions.forEach(s => {
-        console.log(`     [${s.priority.toUpperCase()}] ${s.action}`)
+        this.log(`     [${s.priority.toUpperCase()}] ${s.action}`)
       })
     }
 
-    console.log(`  ${quality.needsPreprocessing ? '⚠️' : '✅'} Necessita preprocessamento: ${quality.needsPreprocessing ? 'SIM' : 'NÃO'}`)
+    this.log(`  ${quality.needsPreprocessing ? '⚠️' : '✅'} Preprocessamento: ${quality.needsPreprocessing ? 'NECESSÁRIO' : 'OPCIONAL'}`)
   }
 
-  /**
-   * Imprime relatório de rotação formatado
-   */
   printRotationReport(rotation) {
-    console.log(`  🔄 Método: ${rotation.method}`)
-    console.log(`  📐 Ângulo detectado: ${rotation.angle}°`)
-    console.log(`  🎯 Confiança: ${(rotation.confidence * 100).toFixed(1)}%`)
-    console.log(`  ${rotation.needsRotation ? '🔄' : '✅'} Necessita rotação: ${rotation.needsRotation ? 'SIM' : 'NÃO'}`)
+    this.log(`  🔄 Método: ${rotation.method}`)
+    this.log(`  📐 Ângulo: ${rotation.angle}°`)
+    this.log(`  🎯 Confiança: ${(rotation.confidence * 100).toFixed(1)}%`)
+    this.log(`  ${rotation.needsRotation ? '🔄' : '✅'} Rotação: ${rotation.needsRotation ? 'NECESSÁRIA' : 'NÃO NECESSÁRIA'}`)
   }
 
   /**
-   * Salva imagem processada
+   * Salva imagem preservando formato
    */
-  async saveProcessed(processedBuffer, originalPath, outputDir = './uploads/processed') {
+  async saveProcessed(processedBuffer, originalPath, options = {}) {
     try {
-      // Criar diretório se não existir
+      const outputDir = options.outputDir || './uploads/processed'
+      
       if (!fs.existsSync(outputDir)) {
         fs.mkdirSync(outputDir, { recursive: true })
       }
 
-      const baseName = path.basename(originalPath, path.extname(originalPath))
-      const outputPath = path.join(outputDir, `${baseName}_processed.png`)
+      const ext = path.extname(originalPath).toLowerCase()
+      const format = options.format || ext.replace('.', '')
+      const baseName = path.basename(originalPath, ext)
+      const outputPath = path.join(outputDir, `${baseName}_processed.${format}`)
 
-      await sharp(processedBuffer)
-        .png()
-        .toFile(outputPath)
+      let pipeline = sharp(processedBuffer)
 
-      console.log(`💾 Imagem salva: ${outputPath}`)
+      // Preservar/converter formato
+      switch (format) {
+        case 'jpeg':
+        case 'jpg':
+          pipeline = pipeline.jpeg({ quality: options.quality || 90 })
+          break
+        case 'png':
+          pipeline = pipeline.png({ compressionLevel: options.compressionLevel || 6 })
+          break
+        case 'webp':
+          pipeline = pipeline.webp({ quality: options.quality || 90 })
+          break
+        default:
+          pipeline = pipeline.png()
+      }
+
+      await pipeline.toFile(outputPath)
+
+      this.log(`💾 Imagem salva: ${outputPath}`)
       return outputPath
 
     } catch (error) {
-      console.error('❌ Erro ao salvar imagem:', error.message)
+      console.error('❌ Erro ao salvar:', error.message)
       throw error
+    }
+  }
+
+  /**
+   * Cleanup de recursos
+   */
+  async cleanup() {
+    if (this.rotationDetector) {
+      await this.rotationDetector.cleanup()
     }
   }
 }

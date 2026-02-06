@@ -1,75 +1,76 @@
 import sharp from 'sharp'
 
-/**
- * Configuração do detector de rotação.
- * Todos os thresholds e limites são externalizados aqui.
- */
 const DEFAULT_CONFIG = {
-  // Heurística dimensional
-  suspiciousAspectRatio: 0.4,      // height/width > 2.5x indica possível rotação
-  wideAspectRatio: 2.5,            // width/height > 2.5x também indica possível rotação
-
-  // Análise visual (fallback)
-  visualMinSize: 100,              // Imagens < 100px não valem análise
-  visualMaxSize: 10_000_000,       // Imagens > 10MP são muito caras
-  visualResizeTarget: 150,         // Reduzir para análise rápida
-  visualGradientThreshold: 40,     // Mínimo para considerar borda
-  visualRatioThreshold: 2.0,       // Ratio vertical/horizontal para detectar rotação
-  visualSampleStep: 5,             // Pular pixels na amostragem
-
-  // Logs
-  enableLogs: true                // Desabilitar em produção
+  // Estratégia do OSD: 'auto' | 'always' | 'never'
+  osdStrategy: 'never',  // Default: dimensional apenas (mais rápido)
+  osdFormats: ['jpeg', 'jpg', 'png', 'webp'],
+  osdMinConfidence: 40,
+  osdMaxSize: 5_000_000,
+  osdTimeout: 5000,
+  enableLogs: false
 }
 
 /**
- * Detecta se uma imagem está rotacionada e corrige.
+ * RotationDetector - APENAS DETECTA rotação
  * 
- * OTIMIZADO PARA: prints/screenshots em PNG (95%+ dos casos)
- * 
- * Filosofia:
- * - PNG de print = decisão instantânea baseada em dimensões
- * - Fotos (JPEG/HEIC) = EXIF primeiro, visual se necessário
- * - Evitar sharp.raw() e processamento pesado quando desnecessário
+ * IMPORTANTE: Este módulo NÃO aplica mais a rotação!
+ * A rotação é aplicada no pipeline único do Sharp no Preprocessor.
  */
 class RotationDetector {
-  constructor(config = {}) {
+  constructor(config = {}, ocrEngine = null) {
     this.config = { ...DEFAULT_CONFIG, ...config }
-    this.log = this.config.enableLogs ? console.log : () => { }
+    this.log = this.config.enableLogs ? console.log : () => {}
+
+    // Lazy loading do OCR engine
+    this.ocrEngine = ocrEngine
   }
 
   /**
-   * Detecta rotação da imagem.
+   * Detecta rotação necessária (NÃO aplica!)
    * 
-   * Para PNG: apenas metadata + heurística dimensional (< 10ms)
-   * Para JPEG/HEIC: metadata + EXIF, fallback visual se necessário
+   * @param {Buffer|string} input - Buffer ou caminho da imagem
+   * @returns {Object} - { angle, confidence, method, needsRotation }
    */
   async detect(input) {
     try {
       const image = sharp(input)
       const metadata = await image.metadata()
+      const { format, width, height, orientation } = metadata
 
-      const { format, width, height } = metadata
+      this.log(`🖼️ Analisando: ${format} ${width}x${height}`)
 
-      // PNG: decisão rápida baseada apenas em dimensões
-      if (format === 'png') {
-        return this.detectPngRotation(width, height)
-      }
-
-      // Fotos: EXIF primeiro
-      const exifResult = this.detectFromExif(metadata)
+      // 1. EXIF
+      const exifResult = this.detectFromExif(orientation)
       if (exifResult.needsRotation) {
         this.log(`📷 EXIF: ${exifResult.angle}°`)
         return exifResult
       }
 
-      // Fallback: análise visual (raramente usado)
-      if (this.shouldUseVisualAnalysis(format, width, height)) {
-        this.log('🔍 Fallback visual')
-        return await this.detectVisually(image, width, height)
+      // 2. Dimensional
+      const dimensionalResult = this.detectDimensional(width, height)
+
+      // Se dimensional tem alta confiança, retornar
+      if (dimensionalResult.confidence >= 0.8) {
+        this.log(`📐 Dimensional: ${dimensionalResult.angle}° (conf: ${dimensionalResult.confidence})`)
+        return dimensionalResult
       }
 
-      // Default: assumir correto
-      return this.createResult(0, 0.8, 'assumed_correct')
+      // 3. OSD (Smart Fallback)
+      if (this.shouldUseOSD(format, width, height, dimensionalResult.confidence)) {
+        this.log(`🤔 Dúvida dimensional (${dimensionalResult.confidence}). Chamando OSD...`)
+        const buffer = await image.toBuffer()
+        const osdResult = await this.detectWithOSD(buffer)
+
+        if (osdResult.confidence >= this.config.osdMinConfidence / 100) {
+          this.log(`✅ OSD: ${osdResult.angle}° (conf: ${osdResult.confidence})`)
+          return osdResult
+        }
+
+        this.log('⚠️ OSD inconclusivo, mantendo dimensional.')
+      }
+
+      this.log('✅ Assumindo correto (fallback)')
+      return dimensionalResult
 
     } catch (error) {
       console.error('Erro ao detectar rotação:', error.message)
@@ -77,55 +78,7 @@ class RotationDetector {
     }
   }
 
-  /**
-   * Detecção para PNG: puramente dimensional.
-   * Não precisa processar pixels, apenas analisar aspect ratio.
-   */
-  detectPngRotation(width, height) {
-    const aspectRatio = width / height
-    const { suspiciousAspectRatio, wideAspectRatio } = this.config
-
-    // Simplesmente horizontal (largura > altura)
-    // Ex: 960x480 = 2 > 1 → posição horizontal
-    if (aspectRatio > 1) {
-      this.log(`📐 PNG simplesmente horizontal: ${width} > ${height}`)
-      return this.createResult(-90, 1, 'simply_horizontal', true, {
-        aspectRatio,
-        reason: 'width_comparison'
-      })
-    }
-
-    // Extremamente vertical (altura >> largura)
-    // Ex: 500x2000 = 0.25 < 0.4 → pode ser rotacionado
-    if (aspectRatio < suspiciousAspectRatio) {
-      this.log(`📐 PNG vertical suspeito: ${width}x${height}`)
-      return this.createResult(90, 0.7, 'dimensional_vertical', true, {
-        aspectRatio,
-        reason: 'narrow_vertical'
-      })
-    }
-
-    // Extremamente horizontal (largura >> altura)
-    // Ex: 2000x500 = 4.0 > 2.5 → pode ser rotacionado
-    if (aspectRatio > wideAspectRatio) {
-      this.log(`📐 PNG horizontal suspeito: ${width}x${height}`)
-      return this.createResult(90, 0.6, 'dimensional_horizontal', true, {
-        aspectRatio,
-        reason: 'narrow_horizontal'
-      })
-    }
-
-    // Caso normal: PNG provavelmente correto
-    this.log(`✅ PNG dimensões normais: ${width}x${height}`)
-    return this.createResult(0, 0.95, 'png_default', false, { aspectRatio })
-  }
-
-  /**
-   * Detecção via EXIF (fotos de câmera).
-   */
-  detectFromExif(metadata) {
-    const { orientation } = metadata
-
+  detectFromExif(orientation) {
     const rotationMap = {
       3: 180,
       6: 90,
@@ -143,148 +96,101 @@ class RotationDetector {
     )
   }
 
-  /**
-   * Decide se vale a pena usar análise visual.
-   * Apenas para formatos foto SEM EXIF útil.
-   */
-  shouldUseVisualAnalysis(format, width, height) {
-    const { visualMinSize, visualMaxSize } = this.config
-    const totalPixels = width * height
+  detectDimensional(width, height) {
+    if (!width || !height) {
+      return this.createResult(0, 0, 'dimensional_invalid', false)
+    }
 
-    // Nunca para PNG (já tratado)
-    if (format === 'png') return false
+    // Landscape → precisa rotacionar
+    if (width > height) {
+      this.log(`📐 Landscape detectado: ${width}x${height} → Rotacionar 90°`)
+      return this.createResult(
+        90,
+        0.4,
+        'dimensional_simple',
+        true,
+        { width, height }
+      )
+    }
 
-    // Não para imagens muito pequenas ou muito grandes
-    if (width < visualMinSize || height < visualMinSize) return false
-    if (totalPixels > visualMaxSize) return false
-
-    // Apenas para JPEG/HEIC sem EXIF
-    return format === 'jpeg' || format === 'jpg' || format === 'heic'
+    // Portrait → correto
+    this.log(`✅ Portrait detectado: ${width}x${height} → OK`)
+    return this.createResult(
+      0,
+      0.9,
+      'dimensional_simple',
+      false,
+      { width, height }
+    )
   }
 
-  /**
-   * Análise visual: último recurso.
-   * Detecta apenas rotação de 90° baseado em predominância de bordas.
-   */
-  async detectVisually(image, originalWidth, originalHeight) {
+  shouldUseOSD(format, width, height, currentConfidence = 1.0) {
+    const { osdStrategy, osdFormats, osdMaxSize } = this.config
+
+    if (osdStrategy === 'never') return false
+    if (!width || !height) return false
+    if (!osdFormats.includes(format)) return false
+    if ((width * height) > osdMaxSize) return false
+
+    if (osdStrategy === 'always') return true
+    if (osdStrategy === 'auto') return currentConfidence < 0.8
+
+    return false
+  }
+
+  async detectWithOSD(buffer) {
     try {
-      const { visualResizeTarget, visualGradientThreshold, visualRatioThreshold, visualSampleStep } = this.config
+      if (!this.ocrEngine) {
+        this.log('⚠️ Nenhum motor OCR injetado. Criando instância local...')
+        const TesseractEngine = (await import('./TesseractEngine_IMPROVED.js')).default
+        this.ocrEngine = new TesseractEngine(this.config)
+      }
 
-      // Resize para análise rápida
-      const { data, info } = await image
-        .clone()
-        .resize(visualResizeTarget, visualResizeTarget, { fit: 'inside' })
-        .greyscale()
-        .raw()
-        .toBuffer({ resolveWithObject: true })
-
-      const { horizontal, vertical } = this.computeGradients(
-        data,
-        info.width,
-        info.height,
-        visualGradientThreshold,
-        visualSampleStep
+      const osdPromise = this.ocrEngine.detectOrientation(buffer)
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('OSD timeout')), this.config.osdTimeout)
       )
 
-      const ratio = vertical / (horizontal + 1)
+      const result = await Promise.race([osdPromise, timeoutPromise])
 
-      // Só detecta rotação se ratio for muito alto
-      if (ratio > visualRatioThreshold) {
-        return this.createResult(90, 0.6, 'visual', true, {
-          horizontal,
-          vertical,
-          ratio
-        })
+      return this.createResult(
+        result.degrees || 0,
+        result.confidence || 0,
+        'tesseract_osd',
+        (result.degrees || 0) !== 0,
+        { rawConfidence: result.confidence }
+      )
+
+    } catch (error) {
+      this.log(`⚠️ OSD falhou: ${error.message}`)
+
+      if (error.message === 'OSD timeout' && this.ocrEngine) {
+        this.log('🛑 Reiniciando worker travado...')
+        await this.ocrEngine.cleanup().catch(() => {})
       }
 
-      return this.createResult(0, 0.5, 'visual_uncertain', false, {
-        horizontal,
-        vertical,
-        ratio
+      return this.createResult(0, 0, 'osd_failed', false, {
+        reason: error.message
       })
-
-    } catch (error) {
-      console.error('Erro na análise visual:', error.message)
-      return this.createResult(0, 0, 'visual_failed')
     }
   }
 
-  /**
-   * Calcula gradientes horizontais e verticais.
-   * Amostragem esparsa para velocidade.
-   */
-  computeGradients(data, width, height, threshold, step) {
-    let horizontal = 0
-    let vertical = 0
-
-    for (let y = 1; y < height - 1; y += step) {
-      for (let x = 1; x < width - 1; x += step) {
-        const idx = y * width + x
-
-        const gx = Math.abs(data[idx + 1] - data[idx - 1])
-        const gy = Math.abs(data[idx + width] - data[idx - width])
-
-        if (gx > threshold) horizontal++
-        if (gy > threshold) vertical++
-      }
-    }
-
-    return { horizontal, vertical }
-  }
-
-  /**
-   * Aplica rotação na imagem.
-   */
-  async rotate(input, angle) {
-    if (angle === 0) {
-      this.log('ℹ️  Sem rotação necessária')
-      return input
-    }
-
-    this.log(`🔄 Rotacionando ${angle}°`)
-
-    try {
-      return await sharp(input)
-        .rotate(angle)
-        .toBuffer()
-    } catch (error) {
-      console.error('Erro ao rotacionar:', error.message)
-      throw error
-    }
-  }
-
-  /**
-   * Detecta e corrige em uma operação.
-   */
-  async detectAndCorrect(input) {
-    const detection = await this.detect(input)
-
-    if (detection.needsRotation) {
-      const buffer = await this.rotate(input, detection.angle)
-      return { buffer, detection }
-    }
-
-    return { buffer: input, detection }
-  }
-
-  /**
-   * Helper: cria objeto de resultado padronizado.
-    *
-    * @param {number} angle - Ângulo calculado.
-    * @param {number} confidence - Confiança do resultado.
-    * @param {string} method - Método utilizado.
-    * @param {boolean} [needsRotation=angle !== 0] - Indica se precisa rotacionar.
-    * @param {Object} [extra={}] - Dados adicionais.
-    *
-    * @returns {Object} Resultado padronizado.
-    */
   createResult(angle, confidence, method, needsRotation = angle !== 0, extra = {}) {
+    const normalizedAngle = ((angle % 360) + 360) % 360
+
     return {
-      angle,
+      angle: normalizedAngle,
       confidence,
       method,
       needsRotation,
       ...extra
+    }
+  }
+
+  async cleanup() {
+    if (this.ocrEngine && this.ocrEngine.cleanup) {
+      await this.ocrEngine.cleanup()
+      this.ocrEngine = null
     }
   }
 }

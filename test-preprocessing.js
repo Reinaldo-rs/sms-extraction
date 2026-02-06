@@ -50,10 +50,17 @@ Após adicionar a imagem, execute novamente:
     const testImage = path.join(uploadsDir, testImages[0])
     console.log(`\n🎯 Testando com: ${testImages[0]}\n`)
 
+    // ---------------------------------------------------------
+    // 1. CRIA O MOTOR COMPARTILHADO 
+    // ---------------------------------------------------------
+    console.log('⚙️  Inicializando Motor OCR Compartilhado...')
+    const sharedEngine = new TesseractEngine({
+      enableLogs: true // Útil para ver logs no teste
+    })
     // PARTE 1: PREPROCESSAMENTO
     console.log('📍 INICIANDO PREPROCESSAMENTO...\n')
-    
-    const preprocessor = new Preprocessor()
+
+    const preprocessor = new Preprocessor({}, sharedEngine)
     const preprocessed = await preprocessor.process(testImage)
 
     // Salvar imagem processada
@@ -64,15 +71,16 @@ Após adicionar a imagem, execute novamente:
 
     // PARTE 2: OCR
     console.log('\n📍 INICIANDO OCR...\n')
-    
-    const tesseract = new TesseractEngine(TesseractEngine.getSMSConfig())
-    const ocrResult = await tesseract.extract(preprocessed.processed.buffer)
+
+    // 3. REUTILIZAÇÃO: Não criamos 'new TesseractEngine' de novo.
+    // Usamos o mesmo motor que já está "quente" na memória.
+    const ocrResult = await sharedEngine.extract(preprocessed.processed.buffer)
 
     // RESULTADO FINAL
     console.log('\n' + '='.repeat(70))
     console.log('📋 RESULTADO FINAL')
     console.log('='.repeat(70))
-    
+
     console.log('\n📊 PREPROCESSAMENTO:')
     console.log(`   Qualidade Original: ${(preprocessed.quality.score * 100).toFixed(1)}% (${preprocessed.quality.grade})`)
     console.log(`   Rotação Detectada: ${preprocessed.rotation.angle}°`)
@@ -107,7 +115,21 @@ Após adicionar a imagem, execute novamente:
     console.log('✅ TESTE CONCLUÍDO COM SUCESSO!')
     console.log('='.repeat(70))
 
+    // =================================================================
+    // 4. LIMPEZA DE RECURSOS (Adicione isto no final, antes de fechar o try)
+    // =================================================================
+    console.log('\n🧹 Limpando recursos (Workers)...')
+    await sharedEngine.cleanup() // Mata os processos do Tesseract para o teste encerrar
+
+    console.log('\n' + '='.repeat(70))
+    console.log('✅ TESTE CONCLUÍDO COM SUCESSO!')
+    console.log('='.repeat(70))
+
   } catch (error) {
+    // Se der erro, tentamos limpar também para não travar o terminal
+    if (typeof sharedEngine !== 'undefined') {
+      await sharedEngine.cleanup().catch(() => { })
+    }
     console.error('\n❌ ERRO NO TESTE:', error.message)
     console.error(error.stack)
   }

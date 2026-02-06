@@ -4,6 +4,15 @@ import sharp from 'sharp'
  * Analisa a qualidade de uma imagem e sugere melhorias
  */
 class QualityAnalyzer {
+  constructor(config = {}) {
+    this.config = {
+      enableLogs: config.enableLogs ?? true,
+      ...config
+    }
+    
+    this.log = this.config.enableLogs ? console.log : () => {}
+  }
+
   /**
    * Analisa imagem e retorna score + sugestões
    * @param {Buffer|string} input - Buffer ou caminho da imagem
@@ -188,12 +197,11 @@ class QualityAnalyzer {
       const { data, info } = await image
         .clone()
         .greyscale()
-        .resize(500, 500, { fit: 'inside' }) // Reduz para velocidade
+        .resize(500, 500, { fit: 'inside' })
         .raw()
         .toBuffer({ resolveWithObject: true })
 
       // Calcula variância (medida de nitidez)
-      // Imagens borradas têm baixa variância
       const variance = this.calculateVariance(data)
       
       // Normaliza (valores típicos: 0-1000)

@@ -1,147 +1,178 @@
 import sharp from 'sharp'
 
 /**
- * Melhora a qualidade da imagem para OCR
+ * ImageEnhancer - Retorna Sharp Pipeline
+ * 
+ * IMPORTANTE: Métodos agora retornam Sharp pipeline (não buffer)
+ * para permitir encadeamento sem re-encodificação.
  */
 class ImageEnhancer {
-  /**
-   * Aplica melhorias na imagem baseado na análise de qualidade
-   * @param {Buffer|string} input - Buffer ou caminho da imagem
-   * @param {Object} qualityAnalysis - Resultado do QualityAnalyzer
-   * @returns {Buffer} - Imagem melhorada
-   */
-  async enhance(input, qualityAnalysis) {
-    try {
-      console.log('✨ Iniciando melhorias na imagem...')
-      
-      let pipeline = sharp(input)
-      const metadata = await sharp(input).metadata()
-
-      // 1. Redimensionar se necessário
-      pipeline = await this.resizeIfNeeded(pipeline, metadata, qualityAnalysis)
-
-      // 2. Ajustar brilho
-      pipeline = this.adjustBrightness(pipeline, qualityAnalysis.analysis.brightness)
-
-      // 3. Normalizar contraste
-      if (qualityAnalysis.analysis.contrast.score < 0.7) {
-        console.log('  📊 Normalizando contraste...')
-        pipeline = pipeline.normalize()
-      }
-
-      // 4. Aplicar sharpening
-      pipeline = this.applySharpen(pipeline, qualityAnalysis.analysis.sharpness)
-
-      // 5. Reduzir ruído (se necessário)
-      if (qualityAnalysis.analysis.sharpness.status === 'sharp') {
-        console.log('  🔇 Reduzindo ruído...')
-        pipeline = pipeline.median(3)
-      }
-
-      // 6. Converter para formato otimizado para OCR
-      pipeline = pipeline
-        .toColorspace('srgb')
-        .removeAlpha()
-
-      const enhanced = await pipeline.toBuffer()
-      console.log('✅ Imagem melhorada com sucesso')
-
-      return enhanced
-
-    } catch (error) {
-      console.error('❌ Erro ao melhorar imagem:', error.message)
-      throw error
+  constructor(config = {}) {
+    this.config = {
+      enableLogs: config.enableLogs ?? true,
+      targetHeight: config.targetHeight ?? 1920,
+      ...config
     }
+    
+    this.log = this.config.enableLogs ? console.log : () => {}
   }
 
   /**
-   * Redimensiona imagem se necessário
+   * Adiciona melhorias ao pipeline Sharp
+   * 
+   * @param {Sharp} pipeline - Pipeline Sharp existente
+   * @param {Object} qualityAnalysis - Resultado do QualityAnalyzer
+   * @returns {Sharp} - Pipeline com melhorias adicionadas
    */
-  async resizeIfNeeded(pipeline, metadata, qualityAnalysis) {
+  enhance(pipeline, qualityAnalysis = null) {
+    this.log('✨ Adicionando melhorias ao pipeline...')
+
+    // 1. Redimensionar (se necessário)
+    if (qualityAnalysis?.metadata) {
+      pipeline = this.addResize(pipeline, qualityAnalysis.metadata, qualityAnalysis)
+    }
+
+    // 2. Ajustar brilho
+    if (qualityAnalysis?.analysis?.brightness) {
+      pipeline = this.addBrightnessAdjustment(pipeline, qualityAnalysis.analysis.brightness)
+    }
+
+    // 3. Normalizar contraste
+    if (qualityAnalysis?.analysis?.contrast?.score < 0.7) {
+      this.log('  📊 Normalizando contraste...')
+      pipeline = pipeline.normalize()
+    }
+
+    // 4. Aplicar sharpening
+    if (qualityAnalysis?.analysis?.sharpness) {
+      pipeline = this.addSharpen(pipeline, qualityAnalysis.analysis.sharpness)
+    }
+
+    // 5. Reduzir ruído (se muito nítida)
+    if (qualityAnalysis?.analysis?.sharpness?.status === 'sharp') {
+      this.log('  🔇 Reduzindo ruído...')
+      pipeline = pipeline.median(3)
+    }
+
+    // 6. Preparar para OCR
+    pipeline = pipeline
+      .toColorspace('srgb')
+      .removeAlpha()
+      .greyscale()
+
+    this.log('✅ Melhorias adicionadas ao pipeline')
+
+    return pipeline
+  }
+
+  /**
+   * Pipeline básico de preprocessamento
+   * 
+   * @param {Sharp} pipeline - Pipeline Sharp existente
+   * @returns {Sharp} - Pipeline com preprocessamento básico
+   */
+  preprocessForOCR(pipeline) {
+    this.log('🔧 Preprocessamento básico para OCR...')
+
+    return pipeline
+      .resize(null, this.config.targetHeight, { 
+        fit: 'inside', 
+        kernel: sharp.kernel.lanczos3 
+      })
+      .normalize()
+      .sharpen({ sigma: 1.5, m1: 0.7, m2: 0.7 })
+      .median(3)
+      .greyscale()
+  }
+
+  /**
+   * Adiciona redimensionamento ao pipeline
+   */
+  addResize(pipeline, metadata, qualityAnalysis) {
     const { width, height } = metadata
     const megapixels = (width * height) / 1000000
 
-    // Muito grande (> 8MP) = reduzir para performance
+    // Muito grande (> 8MP) = reduzir
     if (megapixels > 8) {
-      console.log(`  📏 Redimensionando de ${width}x${height} (muito grande)...`)
+      this.log(`  🔍 Redimensionando de ${width}x${height} (muito grande)...`)
       return pipeline.resize(null, 1920, {
         kernel: sharp.kernel.lanczos3,
         fit: 'inside'
       })
     }
 
-    // Muito pequeno (< 1000px altura) = aumentar para melhor OCR
+    // Muito pequeno (< 1000px altura) = aumentar
     if (height < 1000) {
-      console.log(`  📏 Aumentando de ${width}x${height} (muito pequeno)...`)
+      this.log(`  🔍 Aumentando de ${width}x${height} (muito pequeno)...`)
       return pipeline.resize(null, 1500, {
         kernel: sharp.kernel.lanczos3,
         fit: 'inside'
       })
     }
 
-    // Ideal: 1920px altura
+    // Normalizar para 1920px altura
     if (height !== 1920 && height > 1000 && height < 3000) {
-      console.log(`  📏 Normalizando para 1920px altura...`)
+      this.log(`  🔍 Normalizando para 1920px altura...`)
       return pipeline.resize(null, 1920, {
         kernel: sharp.kernel.lanczos3,
         fit: 'inside'
       })
     }
 
-    console.log(`  ℹ️  Tamanho OK: ${width}x${height}`)
+    this.log(`  ℹ️  Tamanho OK: ${width}x${height}`)
     return pipeline
   }
 
   /**
-   * Ajusta brilho da imagem
+   * Adiciona ajuste de brilho ao pipeline
    */
-  adjustBrightness(pipeline, brightnessAnalysis) {
+  addBrightnessAdjustment(pipeline, brightnessAnalysis) {
     const status = brightnessAnalysis.status
 
     if (status === 'too_dark') {
-      console.log('  💡 Aumentando brilho (muito escura)...')
+      this.log('  💡 Aumentando brilho (muito escura)...')
       return pipeline.modulate({
-        brightness: 1.3,  // +30%
+        brightness: 1.3,
         saturation: 1.0
       })
     }
 
     if (status === 'dark') {
-      console.log('  💡 Aumentando brilho levemente...')
+      this.log('  💡 Aumentando brilho levemente...')
       return pipeline.modulate({
-        brightness: 1.15,  // +15%
+        brightness: 1.15,
         saturation: 1.0
       })
     }
 
     if (status === 'too_bright') {
-      console.log('  🔅 Reduzindo brilho (muito clara)...')
+      this.log('  🔅 Reduzindo brilho (muito clara)...')
       return pipeline.modulate({
-        brightness: 0.85,  // -15%
+        brightness: 0.85,
         saturation: 1.0
       })
     }
 
     if (status === 'bright') {
-      console.log('  🔅 Reduzindo brilho levemente...')
+      this.log('  🔅 Reduzindo brilho levemente...')
       return pipeline.modulate({
-        brightness: 0.95,  // -5%
+        brightness: 0.95,
         saturation: 1.0
       })
     }
 
-    console.log('  ℹ️  Brilho OK')
+    this.log('  ℹ️  Brilho OK')
     return pipeline
   }
 
   /**
-   * Aplica sharpening (nitidez)
+   * Adiciona sharpening ao pipeline
    */
-  applySharpen(pipeline, sharpnessAnalysis) {
+  addSharpen(pipeline, sharpnessAnalysis) {
     const status = sharpnessAnalysis.status
 
     if (status === 'blurry') {
-      console.log('  🔪 Aplicando sharpening forte...')
+      this.log('  🔪 Aplicando sharpening forte...')
       return pipeline.sharpen({
         sigma: 2.0,
         m1: 1.0,
@@ -150,7 +181,7 @@ class ImageEnhancer {
     }
 
     if (status === 'soft') {
-      console.log('  🔪 Aplicando sharpening moderado...')
+      this.log('  🔪 Aplicando sharpening moderado...')
       return pipeline.sharpen({
         sigma: 1.5,
         m1: 0.7,
@@ -158,32 +189,8 @@ class ImageEnhancer {
       })
     }
 
-    console.log('  ℹ️  Nitidez OK')
+    this.log('  ℹ️  Nitidez OK')
     return pipeline
-  }
-
-  /**
-   * Pipeline completo de preprocessamento (all-in-one)
-   */
-  async preprocessForOCR(input) {
-    try {
-      console.log('🔧 Preprocessamento rápido para OCR...')
-      
-      const pipeline = await sharp(input)
-        .resize(null, 1920, { fit: 'inside', kernel: sharp.kernel.lanczos3 })
-        .normalize()
-        .sharpen({ sigma: 1.5, m1: 0.7, m2: 0.7 })
-        .median(3)
-        .greyscale()
-        .toBuffer()
-
-      console.log('✅ Preprocessamento concluído')
-      return pipeline
-
-    } catch (error) {
-      console.error('❌ Erro no preprocessamento:', error.message)
-      throw error
-    }
   }
 }
 
