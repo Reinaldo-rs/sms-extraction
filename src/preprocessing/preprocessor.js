@@ -18,7 +18,7 @@ const DEFAULT_CONFIG = {
     enableLogs: false
   },
   rotation: {
-    osdStrategy: 'never',
+    osdStrategy: 'auto',
     enableLogs: false
   },
   enhancement: {

@@ -19,7 +19,7 @@ const DEFAULT_CONFIG = {
 class RotationDetector {
   constructor(config = {}, ocrEngine = null) {
     this.config = { ...DEFAULT_CONFIG, ...config }
-    this.log = this.config.enableLogs ? console.log : () => {}
+    this.log = this.config.enableLogs ? console.log : () => { }
 
     // Lazy loading do OCR engine
     this.ocrEngine = ocrEngine
@@ -37,7 +37,7 @@ class RotationDetector {
       const metadata = await image.metadata()
       const { format, width, height, orientation } = metadata
 
-      this.log(`🖼️ Analisando: ${format} ${width}x${height}`)
+      this.log(`🖼️ Analisando: ${format} ${width}x${height} ${orientation || 1}`)
 
       // 1. EXIF
       const exifResult = this.detectFromExif(orientation)
@@ -88,7 +88,9 @@ class RotationDetector {
     const angle = rotationMap[orientation] || 0
 
     return this.createResult(
-      angle,
+      0,
+      // Workaround para rotação EXIF no Sharp
+      // Ref: Issue #1
       angle !== 0 ? 1.0 : 0,
       'exif',
       angle !== 0,
@@ -166,7 +168,7 @@ class RotationDetector {
 
       if (error.message === 'OSD timeout' && this.ocrEngine) {
         this.log('🛑 Reiniciando worker travado...')
-        await this.ocrEngine.cleanup().catch(() => {})
+        await this.ocrEngine.cleanup().catch(() => { })
       }
 
       return this.createResult(0, 0, 'osd_failed', false, {

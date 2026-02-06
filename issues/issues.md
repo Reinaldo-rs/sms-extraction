@@ -1,4 +1,4 @@
-# 🐞 Known Issues  
+# 🐞 Issues & Known Behaviors
 > Status: **Sem issues conhecidas no momento**
 
 Este documento lista problemas conhecidos, limitações identificadas e comportamentos inesperados relacionados ao projeto.  
@@ -8,8 +8,8 @@ Ele serve como referência rápida para desenvolvedores, QA e stakeholders acomp
 
 ## 📌 Situação Atual
 
-No momento, **não há issues registradas** para este projeto.  
-Até agora, todas as funcionalidades estão operando conforme o esperado e nenhum bug crítico ou recorrente foi identificado.
+> **Sem issues críticas abertas no momento**  
+> O projeto encontra-se estável e funcionando conforme o esperado.
 
 ---
 
