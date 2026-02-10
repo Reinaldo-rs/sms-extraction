@@ -1,20 +1,12 @@
 import sharp from 'sharp'
 
 const DEFAULT_CONFIG = {
-  // Estratégia do OSD: 'auto' | 'always' | 'never'
-  osdStrategy: 'never',  // Default: dimensional apenas (mais rápido)
-  osdFormats: ['jpeg', 'jpg', 'png', 'webp'],
-  osdMinConfidence: 40,
-  osdMaxSize: 5_000_000,
-  osdTimeout: 5000,
-  enableLogs: false
+  minScore: { text: 10, base: 50 },
+  enableLogs: false,
 }
 
 /**
- * RotationDetector - APENAS DETECTA rotação
- * 
- * IMPORTANTE: Este módulo NÃO aplica mais a rotação!
- * A rotação é aplicada no pipeline único do Sharp no Preprocessor.
+ * RotationDetector - APENAS DETECTA rotação 
  */
 class RotationDetector {
   constructor(config = {}, ocrEngine = null) {
@@ -48,32 +40,30 @@ class RotationDetector {
 
       // 2. Dimensional
       const dimensionalResult = this.detectDimensional(width, height)
-
-      // Se dimensional tem alta confiança, retornar
       if (dimensionalResult.confidence >= 0.8) {
         this.log(`📐 Dimensional: ${dimensionalResult.angle}° (conf: ${dimensionalResult.confidence})`)
         return dimensionalResult
       }
 
-      // 3. OSD (Smart Fallback)
-      if (this.shouldUseOSD(format, width, height, dimensionalResult.confidence)) {
-        this.log(`🤔 Dúvida dimensional (${dimensionalResult.confidence}). Chamando OSD...`)
-        const buffer = await image.toBuffer()
-        const osdResult = await this.detectWithOSD(buffer)
-
-        if (osdResult.confidence >= this.config.osdMinConfidence / 100) {
-          this.log(`✅ OSD: ${osdResult.angle}° (conf: ${osdResult.confidence})`)
-          return osdResult
-        }
-
-        this.log('⚠️ OSD inconclusivo, mantendo dimensional.')
+      // 3. Análise de Texto + OCR Multi-Rotação
+      const buffer = await image.toBuffer()
+      const ocrResult = await this.detectWithOCR(buffer)
+      if (ocrResult.confidence > 0.5) {
+        this.log(`🔍 OCR: ${ocrResult.angle}° (conf: ${ocrResult.confidence})`)
+        return ocrResult
       }
 
-      this.log('✅ Assumindo correto (fallback)')
-      return dimensionalResult
+      this.log('⚠️ Sem confiança suficiente — mantendo orientação original')
+      return this.createResult(
+        0,
+        0.3,
+        'fallback',
+        false,
+        { dimensional: dimensionalResult, ocr: ocrResult }
+      )
 
     } catch (error) {
-      console.error('Erro ao detectar rotação:', error.message)
+      this.log('⚠️ Erro ao detectar rotação:', error.message)
       return this.createResult(0, 0, 'error', false, { error: error.message })
     }
   }
@@ -88,13 +78,14 @@ class RotationDetector {
     const angle = rotationMap[orientation] || 0
 
     return this.createResult(
-      0,
-      // Workaround para rotação EXIF no Sharp
-      // Ref: Issue #1
+      0, // Sharp auto-rotaciona via EXIF, não passar ângulo manual (issue #1)
       angle !== 0 ? 1.0 : 0,
       'exif',
       angle !== 0,
-      { originalOrientation: orientation }
+      {
+        originalOrientation: orientation,
+        sharpAutoRotate: angle !== 0
+      }
     )
   }
 
@@ -105,7 +96,7 @@ class RotationDetector {
 
     // Landscape → precisa rotacionar
     if (width > height) {
-      this.log(`📐 Landscape detectado: ${width}x${height} → Rotacionar 90°`)
+      this.log(`📐 Landscape detectado: ${width}x${height} → Rotacionar`)
       return this.createResult(
         90,
         0.4,
@@ -119,62 +110,47 @@ class RotationDetector {
     this.log(`✅ Portrait detectado: ${width}x${height} → OK`)
     return this.createResult(
       0,
-      0.9,
+      0.95,
       'dimensional_simple',
       false,
       { width, height }
     )
   }
 
-  shouldUseOSD(format, width, height, currentConfidence = 1.0) {
-    const { osdStrategy, osdFormats, osdMaxSize } = this.config
-
-    if (osdStrategy === 'never') return false
-    if (!width || !height) return false
-    if (!osdFormats.includes(format)) return false
-    if ((width * height) > osdMaxSize) return false
-
-    if (osdStrategy === 'always') return true
-    if (osdStrategy === 'auto') return currentConfidence < 0.8
-
-    return false
-  }
-
-  async detectWithOSD(buffer) {
+  async detectWithOCR(originalBuffer) {
     try {
-      if (!this.ocrEngine) {
-        this.log('⚠️ Nenhum motor OCR injetado. Criando instância local...')
-        const TesseractEngine = (await import('./TesseractEngine_IMPROVED.js')).default
-        this.ocrEngine = new TesseractEngine(this.config)
+      // 1. Teste 270°
+      const buffer270 = await sharp(originalBuffer).rotate(270).toBuffer()
+      const res270 = await this.ocrEngine.extract(buffer270)
+      const score270 = this.calculateTextScore(res270)
+      this.log(`   📝 Teste 270°: ${res270.wordCount} palavras, score ${score270}`)
+
+      if (score270 > this.config.minScore.base) {
+        return this.createResult(270, 0.9, 'ocr_multi_rotation', true)
       }
 
-      const osdPromise = this.ocrEngine.detectOrientation(buffer)
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('OSD timeout')), this.config.osdTimeout)
-      )
+      // 2. Teste 90°
+      const buffer90 = await sharp(originalBuffer).rotate(90).toBuffer()
+      const res90 = await this.ocrEngine.extract(buffer90)
+      const score90 = this.calculateTextScore(res90)
+      this.log(`   📝 Teste 90°: ${res90.wordCount} palavras, score ${score90}`)
 
-      const result = await Promise.race([osdPromise, timeoutPromise])
+      // 3. Comparação
+      if (score90 > (score270 * 1.5) && score90 > this.config.minScore.text) {
+        return this.createResult(90, 0.85, 'ocr_multi_rotation', true)
+      }
 
-      return this.createResult(
-        result.degrees || 0,
-        result.confidence || 0,
-        'tesseract_osd',
-        (result.degrees || 0) !== 0,
-        { rawConfidence: result.confidence }
-      )
+      return this.createResult(0, 0.8, 'ocr_multi_rotation', false)
 
     } catch (error) {
-      this.log(`⚠️ OSD falhou: ${error.message}`)
-
-      if (error.message === 'OSD timeout' && this.ocrEngine) {
-        this.log('🛑 Reiniciando worker travado...')
-        await this.ocrEngine.cleanup().catch(() => { })
-      }
-
-      return this.createResult(0, 0, 'osd_failed', false, {
-        reason: error.message
-      })
+      this.log(`⚠️ Erro no check OCR: ${error.message}`)
+      return this.createResult(0, 0, 'ocr_failed')
     }
+  }
+
+  calculateTextScore(ocrResult) {
+    if (!ocrResult || !ocrResult.words) return 0
+    return ocrResult.wordCount * (ocrResult.confidence * 100)
   }
 
   createResult(angle, confidence, method, needsRotation = angle !== 0, extra = {}) {
@@ -186,13 +162,6 @@ class RotationDetector {
       method,
       needsRotation,
       ...extra
-    }
-  }
-
-  async cleanup() {
-    if (this.ocrEngine && this.ocrEngine.cleanup) {
-      await this.ocrEngine.cleanup()
-      this.ocrEngine = null
     }
   }
 }

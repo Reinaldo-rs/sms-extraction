@@ -4,23 +4,19 @@ class TesseractEngine {
   constructor(config = {}) {
     this.config = {
       lang: config.lang || 'por',
-      psm: config.psm || 6,
+      psm: config.psm || 6, // Único bloco de texto (ideal para SMS)
       oem: config.oem || 3,
       enableLogs: config.enableLogs || false,
-      ocrTimeout: config.ocrTimeout || 30000,      // 30s timeout para OCR
-      osdTimeout: config.osdTimeout || 5000,       // 5s timeout para OSD
+      ocrTimeout: config.ocrTimeout || 30000,
       minWordConfidence: config.minWordConfidence || 50,
       cacheSize: config.cacheSize || 100,
+      whitelist: config.whitelist || null,
       ...config
     }
 
-    this.log = this.config.enableLogs ? console.log : () => { }
+    this.log = this.config.enableLogs ? console.log : () => {}
 
-    // OSD Worker (orientação)
-    this.osdWorker = null
-    this.osdInitPromise = null
-
-    // OCR Worker (extração de texto)
+    // OCR Worker
     this.ocrWorker = null
     this.ocrInitPromise = null
 
@@ -29,66 +25,7 @@ class TesseractEngine {
   }
 
   // ============================================
-  // OSD (Orientation and Script Detection)
-  // ============================================
-
-  async ensureOSDWorker() {
-    if (this.osdWorker) return this.osdWorker
-
-    if (!this.osdInitPromise) {
-      this.osdInitPromise = (async () => {
-        this.log('🔄 Criando worker OSD...')
-        const worker = await Tesseract.createWorker('osd', 0)
-        this.osdWorker = worker
-        this.log('✅ Worker OSD pronto')
-        return worker
-      })()
-    }
-
-    return this.osdInitPromise
-  }
-
-  async detectOrientation(imageBuffer) {
-    try {
-      const worker = await this.ensureOSDWorker()
-
-      // Timeout protection
-      const osdPromise = worker.detect(imageBuffer)
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('OSD timeout')), this.config.osdTimeout)
-      )
-
-      const { data } = await Promise.race([osdPromise, timeoutPromise])
-
-      return {
-        degrees: data.orientation_degrees || 0,
-        confidence: (data.orientation_confidence || 0) / 100,
-        script: data.script || 'unknown'
-      }
-
-    } catch (error) {
-      console.error('⚠️ Falha no OSD:', error.message)
-
-      // Só reiniciar worker em timeout (erro crítico)
-      if (error.message === 'OSD timeout') {
-        this.log('🛑 Worker OSD travado, reiniciando...')
-        await this.terminateOSD()
-      }
-
-      return { degrees: 0, confidence: 0 }
-    }
-  }
-
-  async terminateOSD() {
-    if (this.osdWorker) {
-      await this.osdWorker.terminate()
-      this.osdWorker = null
-    }
-    this.osdInitPromise = null
-  }
-
-  // ============================================
-  // OCR (Optical Character Recognition)
+  // OCR Worker Management
   // ============================================
 
   async ensureOCRWorker() {
@@ -97,8 +34,6 @@ class TesseractEngine {
     if (!this.ocrInitPromise) {
       this.ocrInitPromise = (async () => {
         this.log('🔄 Criando worker OCR...')
-        this.log(`   Idioma: ${this.config.lang}`)
-        this.log(`   PSM: ${this.config.psm}`)
 
         const worker = await Tesseract.createWorker(
           this.config.lang,
@@ -106,16 +41,15 @@ class TesseractEngine {
           {
             logger: this.config.enableLogs
               ? m => {
-                if (m.status === 'recognizing text') {
-                  const progress = (m.progress * 100).toFixed(0)
-                  process.stdout.write(`\r   Progresso: ${progress}%`)
+                  if (m.status === 'recognizing text') {
+                    const progress = (m.progress * 100).toFixed(0)
+                    process.stdout.write(`\r   Progresso OCR: ${progress}%`)
+                  }
                 }
-              }
               : undefined
           }
         )
 
-        // Configurar parâmetros
         await worker.setParameters({
           tessedit_pageseg_mode: this.config.psm.toString(),
           tessedit_char_whitelist: this.config.whitelist || '',
@@ -123,102 +57,12 @@ class TesseractEngine {
         })
 
         this.ocrWorker = worker
-        this.log('✅ Worker OCR pronto')
+        this.log('\n✅ Worker OCR pronto')
         return worker
-
       })()
     }
 
     return this.ocrInitPromise
-  }
-
-  async extract(image) {
-    const startTime = Date.now()
-
-    try {
-      // Verificar cache
-      const hash = this.hashBuffer(image)
-      if (this.cache.has(hash)) {
-        this.log('💾 Cache hit - retornando resultado anterior')
-        return this.cache.get(hash)
-      }
-
-      this.log('🔤 Iniciando OCR...')
-      this.log(`   Idioma: ${this.config.lang}`)
-      this.log(`   PSM: ${this.config.psm}`)
-
-      const worker = await this.ensureOCRWorker()
-
-      // Timeout protection
-      const ocrPromise = worker.recognize(image)
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('OCR timeout')), this.config.ocrTimeout)
-      )
-
-      const { data } = await Promise.race([ocrPromise, timeoutPromise])
-
-      const elapsed = Date.now() - startTime
-
-      this.log(`\n✅ OCR concluído em ${elapsed}ms`)
-      this.log(`   Confiança média: ${data.confidence.toFixed(1)}%`)
-      this.log(`   Palavras detectadas: ${data.words?.length ?? 0}`)
-
-
-      // Formatar resultado
-      const result = this.formatResult(data, elapsed)
-
-      // Cachear resultado
-      this.cacheResult(hash, result)
-
-      return result
-
-    } catch (error) {
-      console.error('❌ Erro no OCR:', error.message)
-
-      // Só reiniciar worker em timeout (erro crítico)
-      if (error.message === 'OCR timeout') {
-        this.log('🛑 Worker OCR travado, reiniciando...')
-        await this.terminateOCR()
-      }
-
-      throw error
-    }
-  }
-
-  formatResult(data, processingTime, options = {}) {
-    const minConfidence = options.minConfidence ?? this.config.minWordConfidence
-
-    const rawWords = data.words ?? []
-    const rawLines = data.lines ?? []
-
-    const words = rawWords
-      .filter(word => word.confidence > minConfidence)
-      .filter(word => word.text.trim().length > 0) // Remove palavras vazias
-      .map(word => ({
-        text: word.text,
-        confidence: word.confidence / 100,
-        bbox: {
-          left: word.bbox.x0,
-          top: word.bbox.y0,
-          right: word.bbox.x1,
-          bottom: word.bbox.y1
-        }
-      }))
-
-    return {
-      engine: 'tesseract',
-      texts: words,
-      fullText: data.text ?? '',
-      lines: rawLines.length,
-      words: words.length,
-      confidence: (data.confidence ?? 0) / 100,
-      processingTime
-    }
-  }
-
-  async extractText(image) {
-    const result = await this.extract(image)
-    return result.fullText
   }
 
   async terminateOCR() {
@@ -230,11 +74,107 @@ class TesseractEngine {
   }
 
   // ============================================
+  // OCR Extraction
+  // ============================================
+
+  async extract(image) {
+    const startTime = Date.now()
+    let timeoutId
+
+    try {
+      // 1. Cache
+      const hash = this.hashBuffer(image)
+      if (this.cache.has(hash)) {
+        this.log('💾 Cache hit OCR')
+        return this.cache.get(hash)
+      }
+
+      // 2. Executar OCR com timeout
+      const worker = await this.ensureOCRWorker()
+
+      const ocrPromise = worker.recognize(image)
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error('OCR timeout')),
+          this.config.ocrTimeout
+        )
+      })
+
+      const { data } = await Promise.race([ocrPromise, timeoutPromise])
+      const elapsed = Date.now() - startTime
+
+      this.log(`\n✅ OCR concluído em ${elapsed}ms`)
+      this.log(`   Confiança média: ${data.confidence.toFixed(1)}%`)
+      this.log(`   Palavras detectadas: ${data.words?.length ?? 0}`)
+
+      // 3. Formatar resultado
+      const result = this.formatResult(data, elapsed)
+
+      // 4. Cache
+      this.cacheResult(hash, result)
+
+      return result
+    } catch (error) {
+      console.error('❌ Erro no OCR:', error.message)
+      if (error.message === 'OCR timeout') {
+        this.log('🛑 Timeout OCR - Reiniciando worker...')
+        await this.terminateOCR()
+      }
+      throw error
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  async extractText(image) {
+    const result = await this.extract(image)
+    return result.fullText
+  }
+
+  // ============================================
+  // Format Result
+  // ============================================
+
+  formatResult(data, processingTime) {
+    const rawWords = data.words ?? []
+
+    const words = rawWords
+      .filter(word => word.confidence > this.config.minWordConfidence)
+      .filter(word => word.text.trim().length > 0)
+      .map(word => ({
+        text: word.text,
+        confidence: word.confidence / 100,
+        bbox: {
+          left: word.bbox.x0,
+          top: word.bbox.y0,
+          right: word.bbox.x1,
+          bottom: word.bbox.y1
+        }
+      }))
+
+    const validWordCount = words.length
+    const avgConfidence = validWordCount > 0
+      ? words.reduce((acc, w) => acc + w.confidence, 0) / validWordCount
+      : 0
+
+    return {
+      engine: 'tesseract',
+      fullText: data.text ?? '',
+      confidence: avgConfidence,
+      words: validWordCount,
+      wordCount: validWordCount, // Compatibilidade com RotationDetector
+      texts: words, // Array detalhado de palavras
+      lines: data.lines?.length ?? 0,
+      processingTime
+    }
+  }
+
+  // ============================================
   // Cache
   // ============================================
 
   hashBuffer(buffer) {
-    // Hash rápido: tamanho + primeiros/últimos 32 bytes
+    if (!Buffer.isBuffer(buffer)) return 'non-buffer-input'
     const size = buffer.length
     const first = buffer.slice(0, 32).toString('hex')
     const last = buffer.slice(-32).toString('hex')
@@ -242,12 +182,10 @@ class TesseractEngine {
   }
 
   cacheResult(hash, result) {
-    // LRU simples: remove entrada mais antiga se cheio
     if (this.cache.size >= this.config.cacheSize) {
       const firstKey = this.cache.keys().next().value
       this.cache.delete(firstKey)
     }
-
     this.cache.set(hash, result)
   }
 
@@ -258,23 +196,23 @@ class TesseractEngine {
   getCacheStats() {
     return {
       size: this.cache.size,
-      maxSize: this.config.cacheSize
+      maxSize: this.config.cacheSize,
+      hitRate: this._calculateHitRate()
     }
+  }
+
+  _calculateHitRate() {
+    // Placeholder para implementação futura de métricas
+    return 0
   }
 
   // ============================================
   // Cleanup
   // ============================================
 
-  async terminate() {
-    await this.terminateOSD()
+  async cleanup() {
     await this.terminateOCR()
     this.clearCache()
-  }
-
-  // Alias para compatibilidade
-  async cleanup() {
-    await this.terminate()
   }
 
   // ============================================
@@ -284,24 +222,17 @@ class TesseractEngine {
   static getSMSConfig() {
     return {
       lang: 'por',
-      psm: 6,  // Assume um único bloco de texto uniforme
-      oem: 3,  // Default OCR Engine Mode
+      psm: 6, // único bloco de texto uniforme (SMS)
+      oem: 3,
       enableLogs: false,
-      // Caracteres comuns em SMS
-      whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' +
+      ocrTimeout: 30000,
+      minWordConfidence: 50,
+      cacheSize: 100,
+      whitelist:
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' +
         'ÀÁÂÃÄÅàáâãäåÈÉÊËèéêëÌÍÎÏìíîïÒÓÔÕÖòóôõöÙÚÛÜùúûüÇç' +
         '0123456789' +
         ' .,:;!?-/()@#$%&*+=[]{}"\'\n'
-    }
-  }
-
-  static getDocumentConfig() {
-    return {
-      lang: 'por',
-      psm: 3,  // Automatic page segmentation (mais robusto)
-      oem: 3,
-      enableLogs: false,
-      minWordConfidence: 60 // Maior threshold para documentos
     }
   }
 }
