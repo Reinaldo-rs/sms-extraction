@@ -4,11 +4,11 @@ class TesseractEngine {
   constructor(config = {}) {
     this.config = {
       lang: config.lang || 'por',
-      psm: config.psm || 6, // Único bloco de texto (ideal para SMS)
+      psm: config.psm || 6,
       oem: config.oem || 3,
       enableLogs: config.enableLogs || false,
       ocrTimeout: config.ocrTimeout || 30000,
-      minWordConfidence: config.minWordConfidence || 50,
+      minWordConfidence: config.minWordConfidence || 15,
       cacheSize: config.cacheSize || 100,
       whitelist: config.whitelist || null,
       ...config
@@ -155,7 +155,7 @@ class TesseractEngine {
     const validWordCount = words.length
     const avgConfidence = validWordCount > 0
       ? words.reduce((acc, w) => acc + w.confidence, 0) / validWordCount
-      : 0
+      : data.confidence / 100
 
     return {
       engine: 'tesseract',
@@ -226,7 +226,7 @@ class TesseractEngine {
       oem: 3,
       enableLogs: false,
       ocrTimeout: 30000,
-      minWordConfidence: 50,
+      minWordConfidence: 15,
       cacheSize: 100,
       whitelist:
         'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' +
