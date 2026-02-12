@@ -1,7 +1,22 @@
 import sharp from 'sharp'
 
 const DEFAULT_CONFIG = {
-  minScore: { text: 10, base: 50 },
+  minScore: { base: 0.5 },
+
+  textScore: {
+    minTextLength: 15,
+    minAlphaRatio: 0.5,
+
+    weights: {
+      confidence: 0.5,
+      alphaRatio: 0.2,
+      horizontalRatio: 0.2,
+      lengthFactor: 0.1
+    },
+
+    lengthNormalization: 120
+  },
+
   enableLogs: false,
 }
 
@@ -119,30 +134,33 @@ class RotationDetector {
 
   async detectWithOCR(originalBuffer) {
     try {
-      // 1. Teste 270°
+      // 1️⃣ Teste 270°
       const buffer270 = await sharp(originalBuffer).rotate(270).toBuffer()
       const res270 = await this.ocrEngine.extract(buffer270)
       const score270 = this.calculateTextScore(res270)
+
       this.log(`   📝 Teste 270°: ${res270.wordCount} palavras, score ${score270}`)
       this.log(`   📝 Detalhes OCR 270°: ${JSON.stringify(res270)}`)
 
-      if (score270 > this.config.minScore.base) {
-        return this.createResult(270, 0.9, 'ocr_multi_rotation', true)
+      if (score270 >= this.config.minScore.base) {
+        return this.createResult(270, score270, 'ocr_multi_rotation', true)
       }
 
-      // 2. Teste 90°
+      // 2️⃣ Teste 90° (apenas se 270° não passou)
       const buffer90 = await sharp(originalBuffer).rotate(90).toBuffer()
       const res90 = await this.ocrEngine.extract(buffer90)
       const score90 = this.calculateTextScore(res90)
+
       this.log(`   📝 Teste 90°: ${res90.wordCount} palavras, score ${score90}`)
       this.log(`   📝 Detalhes OCR 90°: ${JSON.stringify(res90)}`)
 
-      // 3. Comparação
-      if (score90 > (score270 * 1.5) && score90 > this.config.minScore.text) {
-        return this.createResult(90, 0.85, 'ocr_multi_rotation', true)
+      if (score90 >= this.config.minScore.base) {
+        return this.createResult(90, score90, 'ocr_multi_rotation', true)
       }
 
-      return this.createResult(0, 0.8, 'ocr_multi_rotation', false)
+      // 3️⃣ Nenhum passou → fallback
+      this.log('⚠️ Sem confiança suficiente — mantendo orientação original')
+      return this.createResult(0, Math.max(score270, score90), 'ocr_multi_rotation', false)
 
     } catch (error) {
       this.log(`⚠️ Erro no check OCR: ${error.message}`)
@@ -150,29 +168,42 @@ class RotationDetector {
     }
   }
 
-  // calculateTextScore(ocrResult) {
-  //   if (!ocrResult) return 0
-
-  //   const textLength = ocrResult.fullText?.trim().length || 0
-  // const wordCount = ocrResult.wordCount || 0
-  // const confidence = ocrResult.confidence || 0
-
-  // return (wordCount * 10) + (textLength * 0.5) + (confidence * 100)
-  // }
 
   calculateTextScore(ocrResult) {
-  if (!ocrResult || !ocrResult.fullText) return 0
+    if (!ocrResult || !ocrResult.fullText) return 0
 
-  const text = ocrResult.fullText.trim()
-  if (text.length < 15) return 0 // evita falso positivo com ruído
+    const {
+      minTextLength,
+      minAlphaRatio,
+      weights,
+      lengthNormalization
+    } = this.config.textScore
 
-  const confidence = ocrResult.confidence || 0
+    const text = ocrResult.fullText.trim()
 
-  // penaliza texto muito curto
-  const lengthFactor = Math.min(text.length / 100, 1)
+    // 1️⃣ Tamanho mínimo
+    if (text.length < minTextLength) return 0
 
-  return text.length * confidence * (0.5 + lengthFactor)
-}
+    // 2️⃣ Alpha ratio
+    const alphaChars = (text.match(/[a-zA-ZÀ-ÿ]/g) || []).length
+    const alphaRatio = alphaChars / text.length
+    if (alphaRatio < minAlphaRatio) return 0
+
+    // 3️⃣ Confidence OCR (0–1)
+    const confidence = ocrResult.confidence || 0
+
+    // 4️⃣ Length factor normalizado (0–1)
+    const lengthFactor = Math.min(text.length / lengthNormalization, 1)
+
+    // 5️⃣ Score ponderado
+    const score =
+      (confidence * (weights.confidence ?? 0.5)) +
+      (alphaRatio * (weights.alphaRatio ?? 0.2)) +
+      (lengthFactor * (weights.lengthFactor ?? 0.3))
+
+    return Math.min(Math.max(score, 0), 1)
+  }
+
 
   createResult(angle, confidence, method, needsRotation = angle !== 0, extra = {}) {
     const normalizedAngle = ((angle % 360) + 360) % 360
