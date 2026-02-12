@@ -91,6 +91,30 @@ Input Image
           ▼
    Enhanced Image
 ```
+### Análise de Rotação Detalhada
+```
+Pipeline de Decisão:
+
+1. EXIF (rápido, grátis, 100% confiável)
+   ├─ Presente → Usar orientação (IMG_0)
+   └─ Ausente → Continuar (IMG_0)
+
+2. Dimensional (heurística geométrica, rápido)
+   ├─ Confiança portrait (>0.95) → Usar (IMG_0)
+   ├─ Confiança landscape (<0.8) → Girar -90º (IMG_-90)
+   └─ Zona intermediária → Continuar sem decisão
+
+3. Análise Rápida de Texto
+   ├─ Texto suficiente? (>50 chars esperados) (IMG_-90)
+   │   ├─ Sim → OCR Multi-Rotação
+   │   └─ Não → Reavaliar Dimensional (IMG_0)
+   └─ Continuar
+
+4. OCR Multi-Rotação (caro, preciso)
+   ├─ Testar rotações: 0°, 90°
+   ├─ Avaliar score de texto válido
+   └─ Selecionar melhor resultado
+```
 
 ### Implementação Detalhada
 
