@@ -45,7 +45,6 @@
   "dependencies": {
     "better-sqlite3": "^12.6.2",
     "dotenv": "^17.2.3",
-    "ESLint": "npm:eslint@^8.57.1",
     "file-type": "^21.3.0",
     "image-size": "^2.0.2",
     "jimp": "^1.6.0",

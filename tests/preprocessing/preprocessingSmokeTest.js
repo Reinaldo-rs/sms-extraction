@@ -1,5 +1,5 @@
-import Preprocessor from './src/preprocessing/preprocessor.js'
-import TesseractEngine from './src/ocr/tesseractOCR.js'
+import Preprocessor from '../../src/preprocessing/preprocessor.js'
+import TesseractEngine from '../../src/ocr/tesseractOCR.js'
 import fs from 'fs'
 import path from 'path'
 

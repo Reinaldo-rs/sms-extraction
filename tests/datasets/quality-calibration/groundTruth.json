@@ -1,0 +1,13 @@
+{
+  "sms_001.png": {
+    "ocrConfidence": 0.95,
+    "textExtracted": "PIX recebido",
+    "hasSmallText": false
+  },
+
+  "sms_002.png": {
+    "ocrConfidence": 0.52,
+    "textExtracted": "texto ruim",
+    "hasSmallText": true
+  }
+}

@@ -1,12 +1,36 @@
 import sharp from 'sharp'
+import {
+  TEXT_SIZE,
+  RESOLUTION,
+  SHARPNESS,
+  CONTRAST,
+  BRIGHTNESS,
+  STATUS
+} from './qualityConfig.js'
 
 /**
- * Analisa a qualidade de uma imagem e sugere melhorias
+ * QualityAnalyzer - Motor de Métricas PURO
+ * 
+ * RESPONSABILIDADE: Medir qualidade de imagem
+ * NÃO FAZ: Decisões, recomendações, ou sugestões
+ * 
+ * Princípios:
+ * - Retorna apenas dados estruturados e normalizados
+ * - Zero lógica de negócio
+ * - Todas as métricas independentes
+ * - Facilmente testável
+ * 
+ * @example
+ * const analyzer = new QualityAnalyzer()
+ * const metrics = await analyzer.analyze(imageBuffer)
+ * 
+ * // metrics contém apenas números e status
+ * // Decisões são responsabilidade do QualityPolicy
  */
 class QualityAnalyzer {
   constructor(config = {}) {
     this.config = {
-      enableLogs: config.enableLogs ?? true,
+      enableLogs: config.enableLogs ?? false,
       ...config
     }
     
@@ -14,9 +38,10 @@ class QualityAnalyzer {
   }
 
   /**
-   * Analisa imagem e retorna score + sugestões
+   * Analisa imagem e retorna métricas puras
+   * 
    * @param {Buffer|string} input - Buffer ou caminho da imagem
-   * @returns {Object} - Análise completa
+   * @returns {Promise<Object>} Métricas estruturadas (sem decisões)
    */
   async analyze(input) {
     try {
@@ -24,302 +49,399 @@ class QualityAnalyzer {
       const metadata = await image.metadata()
       const stats = await image.stats()
 
-      // Análises individuais
+      this.log(`\n📊 Analisando qualidade...`)
+      this.log(`   Dimensões: ${metadata.width}x${metadata.height}`)
+
+      // Análises individuais (todas independentes)
       const resolution = this.analyzeResolution(metadata)
+      const textReadability = this.analyzeTextReadability(metadata)
       const brightness = this.analyzeBrightness(stats)
       const contrast = this.analyzeContrast(stats)
-      const sharpness = await this.analyzeSharpness(image)
+      const sharpness = await this.analyzeSharpness(image, metadata)
 
-      // Score geral (0-1)
-      const overallScore = (
-        resolution.score * 0.25 +
-        brightness.score * 0.25 +
-        contrast.score * 0.25 +
-        sharpness.score * 0.25
-      )
-
-      // Sugestões de melhoria
-      const suggestions = this.generateSuggestions({
-        resolution,
-        brightness,
-        contrast,
-        sharpness
-      })
+      // Score geral é calculado FORA (por Policy)
+      // Aqui apenas retornamos as métricas brutas
 
       return {
-        score: overallScore,
-        grade: this.getGrade(overallScore),
         metadata: {
           width: metadata.width,
           height: metadata.height,
           format: metadata.format,
           channels: metadata.channels,
-          hasAlpha: metadata.hasAlpha
+          hasAlpha: metadata.hasAlpha,
+          space: metadata.space
         },
-        analysis: {
+        metrics: {
           resolution,
+          textReadability,
           brightness,
           contrast,
           sharpness
         },
-        suggestions,
-        needsPreprocessing: overallScore < 0.7
+        // Timestamp para auditoria
+        analyzedAt: new Date().toISOString()
       }
+
     } catch (error) {
-      console.error('❌ Erro ao analisar qualidade:', error.message)
-      throw error
+      this.log('❌ Erro ao analisar:', error.message)
+      throw new Error(`QualityAnalyzer: ${error.message}`)
     }
   }
 
   /**
-   * Analisa resolução da imagem
+   * Analisa resolução com detecção de formato SMS
+   * 
+   * Retorna:
+   * - score: 0-1 (normalizado)
+   * - status: classificação semântica
+   * - dimensões brutas
+   * - detecção de formato
+   * - estimativa de altura mínima de texto
    */
   analyzeResolution(metadata) {
     const { width, height } = metadata
     const pixels = width * height
     const megapixels = pixels / 1000000
+    const aspectRatio = height / width
+
+    // Detectar formato SMS (vertical longo)
+    const isSMSFormat = aspectRatio > RESOLUTION.SMS.ASPECT_RATIO_THRESHOLD
 
     let score = 1.0
-    let status = 'excellent'
-    let recommendation = null
+    let status = STATUS.RESOLUTION.EXCELLENT
+    let estimatedMinTextHeight = null
 
-    if (megapixels < 0.5) {
-      score = 0.4
-      status = 'poor'
-      recommendation = 'Imagem muito pequena (< 0.5MP). Use imagem maior.'
-    } else if (megapixels < 2) {
-      score = 0.7
-      status = 'acceptable'
-      recommendation = 'Resolução baixa. Imagens maiores melhoram OCR.'
-    } else if (megapixels > 8) {
-      score = 0.9
-      status = 'good'
-      recommendation = 'Resolução muito alta. Será redimensionada para performance.'
+    if (isSMSFormat) {
+      // Para SMS, altura é crítica
+      estimatedMinTextHeight = Math.round(height * TEXT_SIZE.SMS_MIN_TEXT_RATIO)
+
+      if (height < RESOLUTION.SMS.MIN_HEIGHT_POOR) {
+        score = 0.4
+        status = STATUS.RESOLUTION.TOO_LOW_FOR_SMALL_TEXT
+      } else if (height < RESOLUTION.SMS.MIN_HEIGHT_MARGINAL) {
+        score = 0.65
+        status = STATUS.RESOLUTION.MARGINAL_FOR_SMALL_TEXT
+      } else if (height < RESOLUTION.SMS.MIN_HEIGHT_GOOD) {
+        score = 0.85
+        status = STATUS.RESOLUTION.GOOD
+      } else {
+        score = 1.0
+        status = STATUS.RESOLUTION.EXCELLENT
+      }
+
+    } else {
+      // Para imagens gerais, usar megapixels
+      if (megapixels < RESOLUTION.GENERAL.POOR_MP) {
+        score = 0.4
+        status = STATUS.RESOLUTION.POOR
+      } else if (megapixels < RESOLUTION.GENERAL.ACCEPTABLE_MP) {
+        score = 0.7
+        status = STATUS.RESOLUTION.ACCEPTABLE
+      } else if (megapixels > RESOLUTION.GENERAL.LARGE_MP) {
+        score = 0.9
+        status = STATUS.RESOLUTION.GOOD
+      }
     }
 
     return {
       score,
       status,
-      megapixels: megapixels.toFixed(2),
-      dimensions: `${width}x${height}`,
-      recommendation
+      // Dados brutos
+      width,
+      height,
+      pixels,
+      megapixels: parseFloat(megapixels.toFixed(2)),
+      aspectRatio: parseFloat(aspectRatio.toFixed(2)),
+      isSMSFormat,
+      estimatedMinTextHeight
     }
   }
 
   /**
-   * Analisa brilho da imagem
+   * Analisa legibilidade de texto
+   * 
+   * Estima tamanho de textos pequenos e calcula fator de escala necessário
+   * 
+   * IMPORTANTE: Baseado em heurística (height * ratio)
+   * TODO: Substituir por text detection real quando viável
+   */
+  analyzeTextReadability(metadata) {
+    const { width, height } = metadata
+    const aspectRatio = height / width
+    const isSMSFormat = aspectRatio > RESOLUTION.SMS.ASPECT_RATIO_THRESHOLD
+
+    // Estimar altura mínima de texto
+    const ratio = isSMSFormat 
+      ? TEXT_SIZE.SMS_MIN_TEXT_RATIO 
+      : TEXT_SIZE.DOCUMENT_MIN_TEXT_RATIO
+
+    const estimatedMinTextPx = height * ratio
+    const idealMinTextPx = TEXT_SIZE.IDEAL_MIN_HEIGHT_PX
+    
+    // Calcular fator de escala necessário para atingir ideal
+    const scaleFactor = idealMinTextPx / estimatedMinTextPx
+    const targetHeight = scaleFactor > 1 ? Math.round(height * scaleFactor) : height
+    const targetWidth = scaleFactor > 1 ? Math.round(width * scaleFactor) : width
+    
+    // Score baseado em quão próximo está do ideal
+    let score = Math.min(estimatedMinTextPx / idealMinTextPx, 1.0)
+    let status = STATUS.TEXT.GOOD
+
+    // Classificação
+    if (estimatedMinTextPx < TEXT_SIZE.UNREADABLE_THRESHOLD) {
+      score = 0.2
+      status = STATUS.TEXT.UNREADABLE
+    } else if (estimatedMinTextPx < TEXT_SIZE.POOR_THRESHOLD) {
+      score = 0.4
+      status = STATUS.TEXT.POOR
+    } else if (estimatedMinTextPx < TEXT_SIZE.MARGINAL_THRESHOLD) {
+      score = 0.6
+      status = STATUS.TEXT.MARGINAL
+    } else if (estimatedMinTextPx < TEXT_SIZE.ACCEPTABLE_THRESHOLD) {
+      score = 0.8
+      status = STATUS.TEXT.ACCEPTABLE
+    } else if (estimatedMinTextPx < TEXT_SIZE.GOOD_THRESHOLD) {
+      score = 0.95
+      status = STATUS.TEXT.GOOD
+    } else {
+      score = 1.0
+      status = STATUS.TEXT.EXCELLENT
+    }
+
+    return {
+      score,
+      status,
+      // Dados brutos
+      estimatedMinTextPx: Math.round(estimatedMinTextPx),
+      idealMinTextPx,
+      optimalTextPx: TEXT_SIZE.OPTIMAL_HEIGHT_PX,
+      scaleFactor: parseFloat(scaleFactor.toFixed(2)),
+      targetDimensions: {
+        width: targetWidth,
+        height: targetHeight
+      },
+      currentDimensions: {
+        width,
+        height
+      }
+    }
+  }
+
+  /**
+   * Analisa brilho médio da imagem
+   * 
+   * Calcula média dos canais normalizada para 0-1
    */
   analyzeBrightness(stats) {
     // Média dos canais (0-255)
-    const avgBrightness = stats.channels.reduce((sum, channel) => 
-      sum + channel.mean, 0
+    const avgBrightness = stats.channels.reduce(
+      (sum, channel) => sum + channel.mean, 
+      0
     ) / stats.channels.length
 
-    // Normaliza para 0-1
-    const normalized = avgBrightness / 255
+    // Normalizar para 0-1
+    const normalized = avgBrightness / BRIGHTNESS.MAX_VALUE
 
     let score = 1.0
-    let status = 'good'
-    let recommendation = null
+    let status = STATUS.BRIGHTNESS.GOOD
 
-    if (normalized < 0.2) {
-      score = 0.5
-      status = 'too_dark'
-      recommendation = 'Imagem muito escura. Aumentar brilho.'
-    } else if (normalized < 0.3) {
-      score = 0.7
-      status = 'dark'
-      recommendation = 'Imagem escura. Considere aumentar brilho.'
-    } else if (normalized > 0.8) {
-      score = 0.6
-      status = 'too_bright'
-      recommendation = 'Imagem muito clara. Reduzir brilho.'
-    } else if (normalized > 0.7) {
-      score = 0.85
-      status = 'bright'
-      recommendation = 'Imagem um pouco clara.'
+    // Classificação
+    if (normalized < BRIGHTNESS.TOO_DARK_THRESHOLD) {
+      score = BRIGHTNESS.TOO_DARK_SCORE
+      status = STATUS.BRIGHTNESS.TOO_DARK
+    } else if (normalized < BRIGHTNESS.DARK_THRESHOLD) {
+      score = BRIGHTNESS.DARK_SCORE
+      status = STATUS.BRIGHTNESS.DARK
+    } else if (normalized > BRIGHTNESS.TOO_BRIGHT_THRESHOLD) {
+      score = BRIGHTNESS.TOO_BRIGHT_SCORE
+      status = STATUS.BRIGHTNESS.TOO_BRIGHT
+    } else if (normalized > BRIGHTNESS.BRIGHT_THRESHOLD) {
+      score = BRIGHTNESS.BRIGHT_SCORE
+      status = STATUS.BRIGHTNESS.BRIGHT
+    } else {
+      score = BRIGHTNESS.GOOD_SCORE
+      status = STATUS.BRIGHTNESS.GOOD
     }
 
     return {
       score,
       status,
-      value: normalized.toFixed(3),
-      percentage: (normalized * 100).toFixed(1) + '%',
-      recommendation
+      // Dados brutos
+      normalized: parseFloat(normalized.toFixed(3)),
+      mean: parseFloat(avgBrightness.toFixed(2)),
+      percentage: parseFloat((normalized * 100).toFixed(1))
     }
   }
 
   /**
-   * Analisa contraste da imagem
+   * Analisa contraste usando desvio padrão global
+   * 
+   * StdDev alto = boa separação tonal
+   * StdDev baixo = imagem flat/baixo contraste
    */
   analyzeContrast(stats) {
     // Desvio padrão médio dos canais
-    const avgStdDev = stats.channels.reduce((sum, channel) => 
-      sum + channel.stdev, 0
+    const avgStdDev = stats.channels.reduce(
+      (sum, channel) => sum + channel.stdev, 
+      0
     ) / stats.channels.length
 
-    // Normaliza para 0-1 (contraste bom = stddev alto)
-    const normalized = avgStdDev / 128
+    // Normalizar para 0-1+
+    const normalized = avgStdDev / CONTRAST.STDDEV_NORMALIZER
 
     let score = 1.0
-    let status = 'good'
-    let recommendation = null
+    let status = STATUS.CONTRAST.GOOD
 
-    if (normalized < 0.3) {
-      score = 0.5
-      status = 'low'
-      recommendation = 'Contraste muito baixo. Normalizar contraste.'
-    } else if (normalized < 0.5) {
-      score = 0.7
-      status = 'acceptable'
-      recommendation = 'Contraste baixo. Melhorar contraste.'
-    } else if (normalized > 1.2) {
-      score = 0.8
-      status = 'high'
-      recommendation = 'Contraste muito alto. Pode causar ruído.'
+    // Classificação
+    if (normalized < CONTRAST.VERY_LOW_THRESHOLD) {
+      score = CONTRAST.VERY_LOW_SCORE
+      status = STATUS.CONTRAST.VERY_LOW
+    } else if (normalized < CONTRAST.LOW_THRESHOLD) {
+      score = CONTRAST.LOW_SCORE
+      status = STATUS.CONTRAST.LOW
+    } else if (normalized > CONTRAST.HIGH_THRESHOLD) {
+      score = CONTRAST.HIGH_SCORE
+      status = STATUS.CONTRAST.HIGH
+    } else {
+      score = CONTRAST.GOOD_SCORE
+      status = STATUS.CONTRAST.GOOD
     }
 
     return {
       score,
       status,
-      value: normalized.toFixed(3),
-      stdDev: avgStdDev.toFixed(2),
-      recommendation
+      // Dados brutos
+      normalized: parseFloat(normalized.toFixed(3)),
+      stdDev: parseFloat(avgStdDev.toFixed(2))
     }
   }
 
   /**
-   * Analisa nitidez da imagem (usa Laplacian variance)
+   * Analisa nitidez usando Laplacian Variance REAL
+   * 
+   * Processo:
+   * 1. Converte para grayscale
+   * 2. Limita resolução se muito grande (evitar OOM)
+   * 3. Aplica kernel Laplacian (detecta bordas)
+   * 4. Calcula variância das bordas
+   * 
+   * Variance alta = muitas bordas nítidas = imagem sharp
+   * Variance baixa = poucas bordas = imagem borrada
    */
-  async analyzeSharpness(image) {
+  async analyzeSharpness(image, metadata) {
     try {
-      // Converte para grayscale e aplica Laplacian
-      const { data, info } = await image
+      const { width, height } = metadata
+      
+      // Limitar dimensão apenas se muito grande (evitar OOM)
+      let analysisWidth = width
+      let analysisHeight = height
+      
+      const maxDim = RESOLUTION.MAX_ANALYSIS_DIMENSION
+      
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height)
+        analysisWidth = Math.round(width * scale)
+        analysisHeight = Math.round(height * scale)
+        
+        this.log(`   ⚠️  Limitando análise: ${width}x${height} → ${analysisWidth}x${analysisHeight}`)
+      }
+
+      // Aplicar Laplacian REAL
+      const { data } = await image
         .clone()
         .greyscale()
-        .resize(500, 500, { fit: 'inside' })
+        .resize(analysisWidth, analysisHeight, { 
+          fit: 'inside',
+          kernel: 'lanczos3'
+        })
+        .convolve({
+          width: 3,
+          height: 3,
+          kernel: [
+             0, -1,  0,
+            -1,  4, -1,
+             0, -1,  0
+          ]
+        })
         .raw()
         .toBuffer({ resolveWithObject: true })
 
-      // Calcula variância (medida de nitidez)
+      // Calcular variância das bordas
       const variance = this.calculateVariance(data)
       
-      // Normaliza (valores típicos: 0-1000)
-      const normalized = Math.min(variance / 500, 1.0)
+      // Normalizar
+      const normalized = Math.min(
+        variance / SHARPNESS.VARIANCE_NORMALIZER, 
+        1.0
+      )
 
       let score = normalized
-      let status = 'good'
-      let recommendation = null
+      let status = STATUS.SHARPNESS.SHARP
 
-      if (variance < 50) {
-        score = 0.4
-        status = 'blurry'
-        recommendation = 'Imagem muito borrada. Aplicar sharpening.'
-      } else if (variance < 100) {
-        score = 0.6
-        status = 'soft'
-        recommendation = 'Imagem pouco nítida. Aplicar sharpening leve.'
-      } else if (variance > 800) {
-        score = 0.85
-        status = 'sharp'
-        recommendation = 'Imagem muito nítida. Pode ter ruído.'
+      // Classificação
+      if (variance < SHARPNESS.VERY_BLURRY_THRESHOLD) {
+        score = SHARPNESS.VERY_BLURRY_SCORE
+        status = STATUS.SHARPNESS.VERY_BLURRY
+      } else if (variance < SHARPNESS.BLURRY_THRESHOLD) {
+        score = SHARPNESS.BLURRY_SCORE
+        status = STATUS.SHARPNESS.BLURRY
+      } else if (variance < SHARPNESS.SOFT_THRESHOLD) {
+        score = SHARPNESS.SOFT_SCORE
+        status = STATUS.SHARPNESS.SOFT
+      } else if (variance < SHARPNESS.SHARP_THRESHOLD) {
+        score = SHARPNESS.SHARP_SCORE
+        status = STATUS.SHARPNESS.SHARP
+      } else {
+        score = SHARPNESS.VERY_SHARP_SCORE
+        status = STATUS.SHARPNESS.VERY_SHARP
       }
 
       return {
         score,
         status,
-        variance: variance.toFixed(2),
-        recommendation
+        // Dados brutos
+        variance: parseFloat(variance.toFixed(2)),
+        normalized: parseFloat(normalized.toFixed(3)),
+        // Info de processamento
+        analyzedAt: {
+          width: analysisWidth,
+          height: analysisHeight,
+          wasDownscaled: analysisWidth < width || analysisHeight < height
+        }
       }
+
     } catch (error) {
-      console.error('❌ Erro ao analisar nitidez:', error.message)
+      this.log('❌ Erro em analyzeSharpness:', error.message)
+      
+      // Retornar valores default em caso de erro
       return {
         score: 0.5,
         status: 'unknown',
         variance: 0,
-        recommendation: 'Não foi possível analisar nitidez.'
+        normalized: 0,
+        error: error.message
       }
     }
   }
 
   /**
-   * Calcula variância de um array (medida de dispersão)
+   * Calcula variância de um array
+   * 
+   * Usa algoritmo two-pass (simples e correto)
+   * TODO: Considerar Welford (one-pass) se performance for crítica
    */
   calculateVariance(data) {
-    const mean = data.reduce((sum, val) => sum + val, 0) / data.length
+    const n = data.length
+    
+    // Média
+    const mean = data.reduce((sum, val) => sum + val, 0) / n
+    
+    // Variância
     const variance = data.reduce((sum, val) => {
       return sum + Math.pow(val - mean, 2)
-    }, 0) / data.length
+    }, 0) / n
 
     return variance
-  }
-
-  /**
-   * Gera sugestões de melhoria
-   */
-  generateSuggestions(analysis) {
-    const suggestions = []
-
-    // Resolução
-    if (analysis.resolution.score < 0.7) {
-      suggestions.push({
-        priority: 'high',
-        type: 'resolution',
-        action: 'Use imagem com maior resolução'
-      })
-    }
-
-    // Brilho
-    if (analysis.brightness.status === 'too_dark') {
-      suggestions.push({
-        priority: 'high',
-        type: 'brightness',
-        action: 'Aumentar brilho em 30%'
-      })
-    } else if (analysis.brightness.status === 'too_bright') {
-      suggestions.push({
-        priority: 'medium',
-        type: 'brightness',
-        action: 'Reduzir brilho em 15%'
-      })
-    }
-
-    // Contraste
-    if (analysis.contrast.score < 0.7) {
-      suggestions.push({
-        priority: 'high',
-        type: 'contrast',
-        action: 'Normalizar contraste'
-      })
-    }
-
-    // Nitidez
-    if (analysis.sharpness.status === 'blurry') {
-      suggestions.push({
-        priority: 'high',
-        type: 'sharpness',
-        action: 'Aplicar sharpening forte'
-      })
-    } else if (analysis.sharpness.status === 'soft') {
-      suggestions.push({
-        priority: 'medium',
-        type: 'sharpness',
-        action: 'Aplicar sharpening leve'
-      })
-    }
-
-    return suggestions
-  }
-
-  /**
-   * Converte score em grade (A-F)
-   */
-  getGrade(score) {
-    if (score >= 0.9) return 'A'
-    if (score >= 0.8) return 'B'
-    if (score >= 0.7) return 'C'
-    if (score >= 0.6) return 'D'
-    return 'F'
   }
 }
 
