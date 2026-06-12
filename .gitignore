@@ -10,6 +10,7 @@ data/*.db-shm
 # Uploads e temporários
 uploads/*
 !uploads/.gitkeep
+tests/images/*
 
 # Logs
 logs/*.log

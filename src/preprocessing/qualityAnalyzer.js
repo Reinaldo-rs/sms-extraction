@@ -9,23 +9,15 @@ import {
 } from './qualityConfig.js'
 
 /**
- * QualityAnalyzer - Motor de Métricas PURO
  * 
  * RESPONSABILIDADE: Medir qualidade de imagem
- * NÃO FAZ: Decisões, recomendações, ou sugestões
  * 
  * Princípios:
  * - Retorna apenas dados estruturados e normalizados
- * - Zero lógica de negócio
- * - Todas as métricas independentes
- * - Facilmente testável
  * 
  * @example
  * const analyzer = new QualityAnalyzer()
  * const metrics = await analyzer.analyze(imageBuffer)
- * 
- * // metrics contém apenas números e status
- * // Decisões são responsabilidade do QualityPolicy
  */
 class QualityAnalyzer {
   constructor(config = {}) {
